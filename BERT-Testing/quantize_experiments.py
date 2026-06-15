@@ -7,7 +7,13 @@ def get_topk_predictions(model, tokenizer, text, k=5):
     inputs = tokenizer(text, return_tensors="pt")
     # Find out where 9 is coming from by outputting result as text, potentially mapping values to parts of input text
 
-    print("Token inputs", inputs)
+    input_ids = inputs["input_ids"][0].tolist()
+
+    tokens = tokenizer.convert_ids_to_tokens(input_ids)
+
+    print("Tokenized sequence:")
+    for i, (token_id, token) in enumerate(zip(input_ids,tokens)):
+        print(f"Position {i}: token={token}, id={token_id}")
 
     with torch.no_grad():
         outputs = model(**inputs)
@@ -111,6 +117,30 @@ def compare_results(
 
         print(f"Activation cosine similarity: {cosine_sim:.6f}")
 
+def check_code_works():
+    model_name = "/home/lecacca/VSCode Environment/BERT-Testing/bert_uncased_L-2_H-128_A-2"
+    baseline_model = AutoModelForMaskedLM.from_pretrained(model_name)
+    quant_model = AutoModelForMaskedLM.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    baseline_model.eval()
+    quant_model.eval()
+
+    text = "Paris is the capital of [MASK]."
+
+    baseline_tokens, baseline_scores, baseline_logits, inputs = get_topk_predictions(baseline_model, tokenizer, text, k=5)
+
+    quantize_linear_weights(quant_model.bert.encoder.layer[0].intermediate.dense, num_bits=8)
+
+    quant_tokens, quant_scores, quant_logits, _ = get_topk_predictions(quant_model, tokenizer, text, k=5)
+
+    print("\ncheck_code_works: success")
+    print("Baseline top token:", baseline_tokens[0])
+    print("Quantized top token:", quant_tokens[0])
+    print("Baseline logits shape:", baseline_logits.shape)
+    print("Quantized logits shape:", quant_logits.shape)
+
+    return True
+
 def main():
 
     model_name = "/home/lecacca/VSCode Environment/BERT-Testing/bert_uncased_L-2_H-128_A-2"
@@ -156,4 +186,5 @@ def main():
     print(f"\nParameter count: {parameters_num}")
 
 if __name__ == "__main__":
+    check_code_works()
     main()

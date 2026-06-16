@@ -141,6 +141,61 @@ def check_code_works():
 
     return True
 
+def verify_linear_layer_math(model, module, inputs, label="layer"):
+    saved = {}
+
+    def hook_fn(module, input, output):
+        saved["input"] = input[0].detach()
+        saved["output"] = output.detach()
+
+    # attach hook to chosen sublayer
+    handle = module.register_forward_hook(hook_fn)
+
+    # run model
+    with torch.no_grad():
+        _ = model(**inputs)
+
+    # no longer looking at sublayer
+    handle.remove()
+
+    x = saved["input"]
+    # output saved from PyTorch
+    y_actual = saved["output"]
+    w = module.weight.detach()
+    b = module.bias.detach() if module.bias is not None else None
+
+    y_manual = torch.matmul(x, w.T)
+    if b is not None:
+        y_manual = y_manual + b
+
+    diff = (y_actual - y_manual).abs()
+    max_diff = diff.max().item()
+    mean_diff = diff.mean().item()
+
+    print(f"\nVerifying {label}:")
+    print("Input shape:", x.shape)
+    print("Weight shape:", w.shape)
+    print("Bias shape:", None if b is None else b.shape)
+    print("Output shape:", y_actual.shape)
+    print(f"Manual-vs-actual max abs difference: {max_diff:.10f}")
+    print(f"Manual-vs-actual mean abs difference: {mean_diff:.10f}\n")
+
+    return{
+        "input": x,
+        "weight": w,
+        "bias": b,
+        "actual_output": y_actual,
+        "manual_output": y_manual,
+        "max_diff": max_diff,
+        "mean_diff": mean_diff,
+    }
+
+def get_module_by_name(root, module_path):
+    module = root
+    for part in module_path.split("."):
+        module = getattr(module, part)
+    return module
+
 def main():
 
     model_name = "/home/lecacca/VSCode Environment/BERT-Testing/bert_uncased_L-2_H-128_A-2"
@@ -152,8 +207,17 @@ def main():
 
     text = "Paris is the capital of [MASK]."
 
-    baseline_sublayer = baseline_model.bert.encoder.layer[0].intermediate.dense
-    quant_sublayer = quant_model.bert.encoder.layer[0].intermediate.dense
+    sub_layer = "attention.self.query"
+
+    baseline_sublayer = get_module_by_name(
+        baseline_model.bert.encoder.layer[0],
+        sub_layer
+    )
+
+    quant_sublayer = get_module_by_name(
+        quant_model.bert.encoder.layer[0],
+        sub_layer
+    )
 
     quant_attention_layers = [
         quant_model.bert.encoder.layer[1].attention.self.query,
@@ -169,12 +233,16 @@ def main():
 
     baseline_tokens, baseline_scores, baseline_logits, inputs = get_topk_predictions(baseline_model, tokenizer, text, k=5)
     
+    baseline_check = verify_linear_layer_math(baseline_model, baseline_sublayer, inputs, label=f"baseline {sub_layer}")
+
     baseline_sublayer_activation = capture_activation_for_one_module(baseline_model, baseline_sublayer, inputs)
 
     quantize_linear_weights(quant_sublayer, num_bits=8)
 
     # for layer in quant_attention_layers:
     #     quantize_linear_weights(layer, num_bits=8)
+
+    quant_check = verify_linear_layer_math(quant_model, quant_sublayer, inputs, label=f"fake-quantized {sub_layer}")
 
     quant_tokens, quant_scores, quant_logits, _ = get_topk_predictions(quant_model, tokenizer, text, k=5)
 

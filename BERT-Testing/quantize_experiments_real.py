@@ -4,17 +4,21 @@ from transformers import AutoTokenizer, AutoModelForMaskedLM
 import torch
 from torchao.quantization import quantize_, Int8WeightOnlyConfig, Int4WeightOnlyConfig
 
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
 def get_topk_predictions(model, tokenizer, text, k=5):
     inputs = tokenizer(text, return_tensors="pt")
     # Find out where 9 is coming from by outputting result as text, potentially mapping values to parts of input text
+    device = next(model.parameters()).device
+    inputs = {k: v.to(device) for k, v in inputs.items()}
 
     input_ids = inputs["input_ids"][0].tolist()
 
     tokens = tokenizer.convert_ids_to_tokens(input_ids)
 
-    # print("Tokenized sequence:")
-    # for i, (token_id, token) in enumerate(zip(input_ids,tokens)):
-    #     print(f"Position {i}: token={token}, id={token_id}")
+    print("Tokenized sequence:")
+    for i, (token_id, token) in enumerate(zip(input_ids,tokens)):
+        print(f"Position {i}: token={token}, id={token_id}")
 
     with torch.no_grad():
         outputs = model(**inputs)
@@ -147,8 +151,8 @@ def check_code_works():
 def main():
 
     model_name = "/home/lecacca/VSCode Environment/BERT-Testing/bert_uncased_L-2_H-128_A-2"
-    baseline_model = AutoModelForMaskedLM.from_pretrained(model_name)
-    quant_model = AutoModelForMaskedLM.from_pretrained(model_name)
+    baseline_model = AutoModelForMaskedLM.from_pretrained(model_name).to(device)
+    quant_model = AutoModelForMaskedLM.from_pretrained(model_name).to(device)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     baseline_model.eval()
     quant_model.eval()
@@ -176,13 +180,13 @@ def main():
 
     # quantize_linear_weights(quant_sublayer, num_bits=8)
 
-    # quantize_(quant_sublayer, Int8WeightOnlyConfig())
+    quantize_(quant_model, Int8WeightOnlyConfig())
 
     # for layer in quant_attention_layers:
     #     quantize_linear_weights(layer, num_bits=8)
 
-    for layer in quant_attention_layers:
-        quantize_(layer, Int8WeightOnlyConfig())
+    # for layer in quant_attention_layers:
+    #     quantize_(layer, Int8WeightOnlyConfig())
 
     quant_tokens, quant_scores, quant_logits, _ = get_topk_predictions(quant_model, tokenizer, text, k=5)
 

@@ -3,12 +3,15 @@
 from transformers import AutoTokenizer, AutoModelForMaskedLM 
 import torch
 from torchao.quantization import quantize_, Int8WeightOnlyConfig, Int4WeightOnlyConfig
+import inspect
+import torchao.quantization.quant_api as quant_api
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 def get_topk_predictions(model, tokenizer, text, k=5):
     inputs = tokenizer(text, return_tensors="pt")
     # Find out where 9 is coming from by outputting result as text, potentially mapping values to parts of input text
+    # Take the first parameter in the model and tell me what device it is stored on.
     device = next(model.parameters()).device
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
@@ -181,6 +184,9 @@ def main():
     # quantize_linear_weights(quant_sublayer, num_bits=8)
 
     quantize_(quant_model, Int8WeightOnlyConfig())
+
+    # rabbit hole of inspecting
+    # print(inspect.getsource(quant_api._int8_weight_only_quantize_tensor))
 
     # for layer in quant_attention_layers:
     #     quantize_linear_weights(layer, num_bits=8)

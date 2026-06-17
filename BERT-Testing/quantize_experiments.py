@@ -12,7 +12,10 @@ def get_topk_predictions(model, tokenizer, text, k=5):
     tokens = tokenizer.convert_ids_to_tokens(input_ids)
 
     print("Tokenized sequence:")
-    for i, (token_id, token) in enumerate(zip(input_ids,tokens)):
+
+    for i in range(len(input_ids)):
+        token_id = input_ids[i]
+        token = tokens[i]
         print(f"Position {i}: token={token}, id={token_id}")
 
     with torch.no_grad():
@@ -117,29 +120,29 @@ def compare_results(
 
         print(f"Activation cosine similarity: {cosine_sim:.6f}")
 
-def check_code_works():
-    model_name = "/home/lecacca/VSCode Environment/BERT-Testing/bert_uncased_L-2_H-128_A-2"
-    baseline_model = AutoModelForMaskedLM.from_pretrained(model_name)
-    quant_model = AutoModelForMaskedLM.from_pretrained(model_name)
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    baseline_model.eval()
-    quant_model.eval()
+# def check_code_works():
+#     model_name = "/home/lecacca/VSCode Environment/BERT-Testing/bert_uncased_L-2_H-128_A-2"
+#     baseline_model = AutoModelForMaskedLM.from_pretrained(model_name)
+#     quant_model = AutoModelForMaskedLM.from_pretrained(model_name)
+#     tokenizer = AutoTokenizer.from_pretrained(model_name)
+#     baseline_model.eval()
+#     quant_model.eval()
 
-    text = "Paris is the capital of [MASK]."
+#     text = "Paris is the capital of [MASK]."
 
-    baseline_tokens, baseline_scores, baseline_logits, inputs = get_topk_predictions(baseline_model, tokenizer, text, k=5)
+#     baseline_tokens, baseline_scores, baseline_logits, inputs = get_topk_predictions(baseline_model, tokenizer, text, k=5)
 
-    quantize_linear_weights(quant_model.bert.encoder.layer[0].intermediate.dense, num_bits=8)
+#     quantize_linear_weights(quant_model.bert.encoder.layer[0].intermediate.dense, num_bits=8)
 
-    quant_tokens, quant_scores, quant_logits, _ = get_topk_predictions(quant_model, tokenizer, text, k=5)
+#     quant_tokens, quant_scores, quant_logits, _ = get_topk_predictions(quant_model, tokenizer, text, k=5)
 
-    print("\ncheck_code_works: success")
-    print("Baseline top token:", baseline_tokens[0])
-    print("Quantized top token:", quant_tokens[0])
-    print("Baseline logits shape:", baseline_logits.shape)
-    print("Quantized logits shape:", quant_logits.shape)
+#     print("\ncheck_code_works: success")
+#     print("Baseline top token:", baseline_tokens[0])
+#     print("Quantized top token:", quant_tokens[0])
+#     print("Baseline logits shape:", baseline_logits.shape)
+#     print("Quantized logits shape:", quant_logits.shape)
 
-    return True
+#     return True
 
 def verify_linear_layer_math(model, module, inputs, label="layer"):
     saved = {}
@@ -196,6 +199,28 @@ def get_module_by_name(root, module_path):
         module = getattr(module, part)
     return module
 
+def checksum_output(baseline_output, quant_output):
+    y = baseline_output.reshape(-1)
+    y_hat = quant_output.reshape(-1)
+
+    # e^T(y) is just sum of all entries, use .sum()
+    checksum_baseline = y.sum().item()
+    checksum_quant = y_hat.sum().item()
+    checksum_error = (y_hat-y).sum().item()
+
+    print("\nChecksum of output activations:")
+    print(f"Baseline checksum: {checksum_baseline:.10f}")
+    print(f"Quantized checksum: {checksum_quant:.10f}")
+    print(f"Checksum difference: {checksum_quant - checksum_baseline:.10f}")
+    print(f"Checksum of error: {checksum_error:.10f}\n")
+
+    return{
+        "baseline_checksum": checksum_baseline,
+        "quant_checksum": checksum_quant,
+        "checksum_difference": checksum_quant - checksum_baseline,
+        "checksum_error": checksum_error,
+    }
+
 def main():
 
     model_name = "/home/lecacca/VSCode Environment/BERT-Testing/bert_uncased_L-2_H-128_A-2"
@@ -235,6 +260,11 @@ def main():
     
     baseline_check = verify_linear_layer_math(baseline_model, baseline_sublayer, inputs, label=f"baseline {sub_layer}")
 
+    # inspect small slices of these values
+    print(f"input: {baseline_check["input"][0,0,:5]}")
+    print(f"weight: {baseline_check["weight"][:2, :5]}")
+    print(f"actual output: {baseline_check["actual_output"][0,0,:5]}")
+
     baseline_sublayer_activation = capture_activation_for_one_module(baseline_model, baseline_sublayer, inputs)
 
     quantize_linear_weights(quant_sublayer, num_bits=8)
@@ -248,11 +278,12 @@ def main():
 
     quant_sublayer_activation = capture_activation_for_one_module(quant_model, quant_sublayer, inputs)
 
+    checksum_results = checksum_output(baseline_sublayer_activation, quant_sublayer_activation)
+
     compare_results(baseline_tokens, baseline_scores, baseline_logits, quant_tokens, quant_scores, quant_logits, baseline_sublayer_activation, quant_sublayer_activation)
 
     parameters_num = count_parameters(baseline_model.bert.encoder.layer[1])
     print(f"\nParameter count: {parameters_num}")
 
 if __name__ == "__main__":
-    check_code_works()
     main()

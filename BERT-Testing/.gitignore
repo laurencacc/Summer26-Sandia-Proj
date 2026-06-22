@@ -1,2 +1,6 @@
 .venv/
 .venv-torchao/
+scripts/quant_experiment_log.txt
+scripts/run_all_quant_experiments.py
+scripts/quantization_results.tsv
+scripts/notes.md

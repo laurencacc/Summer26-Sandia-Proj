@@ -184,6 +184,7 @@ def main():
     # quantize_linear_weights(quant_sublayer, num_bits=8)
 
     quantize_(quant_model, Int8WeightOnlyConfig())
+    # Look into code
 
     # rabbit hole of inspecting
     # print(inspect.getsource(quant_api._int8_weight_only_quantize_tensor))

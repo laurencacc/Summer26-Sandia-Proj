@@ -151,7 +151,7 @@ def verify_linear_layer_math(model, module, inputs, label="layer"):
         saved["input"] = input[0].detach()
         saved["output"] = output.detach()
 
-    # attach hook to chosen sublayer
+    # attach hook to chosen sublayer (PyTorch command)
     handle = module.register_forward_hook(hook_fn)
 
     # run model
@@ -199,26 +199,59 @@ def get_module_by_name(root, module_path):
         module = getattr(module, part)
     return module
 
-def checksum_output(baseline_output, quant_output):
-    y = baseline_output.reshape(-1)
-    y_hat = quant_output.reshape(-1)
+# def checksum_output(baseline_output, quant_output):
+#     # We should not expect output, find way to not involve
+#     y = baseline_output.reshape(-1)
 
-    # e^T(y) is just sum of all entries, use .sum()
-    checksum_baseline = y.sum().item()
-    checksum_quant = y_hat.sum().item()
-    checksum_error = (y_hat-y).sum().item()
+#     y_hat = quant_output.reshape(-1)
 
-    print("\nChecksum of output activations:")
-    print(f"Baseline checksum: {checksum_baseline:.10f}")
-    print(f"Quantized checksum: {checksum_quant:.10f}")
-    print(f"Checksum difference: {checksum_quant - checksum_baseline:.10f}")
-    print(f"Checksum of error: {checksum_error:.10f}\n")
+#     # e^T(y) is just sum of all entries, use .sum()
+#     checksum_baseline = y.sum().item()
+#     checksum_quant = y_hat.sum().item()
+#     checksum_error = (y_hat-y).abs().sum().item()
+
+#     print("\nChecksum of output activations:")
+#     print(f"Baseline checksum: {checksum_baseline:.10f}")
+#     print(f"Quantized checksum: {checksum_quant:.10f}")
+#     print(f"Checksum difference: {checksum_quant - checksum_baseline:.10f}")
+#     print(f"Checksum of error: {checksum_error:.10f}\n")
+
+#     return{
+#         "baseline_checksum": checksum_baseline,
+#         "quant_checksum": checksum_quant,
+#         "checksum_difference": checksum_quant - checksum_baseline,
+#         "checksum_error": checksum_error,
+#     }
+
+def expected_checksum_linear_output(input_tensor, weight, bias, label="layer"):
+    expected_output = torch.matmul(input_tensor, weight.T)
+    if bias is not None:
+        expected_output = expected_output + bias
+    
+    y_expected = expected_output.reshape(-1)
+    checksum_expected = y_expected.sum().item()
+
+    # print(f"\nExpected checksum for {label}:")
+    # print(f"Expected checksum: {checksum_expected:.10f}")
 
     return{
-        "baseline_checksum": checksum_baseline,
-        "quant_checksum": checksum_quant,
-        "checksum_difference": checksum_quant - checksum_baseline,
-        "checksum_error": checksum_error,
+        "expected_checksum": checksum_expected,
+        "expected_output": expected_output,
+    }
+
+def compare_expected_checksums(baseline_checksum, quant_checksum, label="layer"):
+    checksum_difference = abs(quant_checksum - baseline_checksum)
+    # fix this ^
+
+    print(f"\nExpected checksum comparison for {label}")
+    print(f"Baseline expected checksum: {baseline_checksum:.10f}")
+    print(f"Quantized expected checksum: {quant_checksum:.10f}")
+    print(f"Expected checksum difference: {checksum_difference:.10f}")
+
+    return{
+        "baseline_expected_checksum": baseline_checksum,
+        "quant_expected_checksum": quant_checksum,
+        "expected_checksum_difference": checksum_difference, 
     }
 
 def main():
@@ -232,7 +265,12 @@ def main():
 
     text = "Paris is the capital of [MASK]."
 
-    sub_layer = "attention.self.query"
+    # sub_layer = "attention.self.query"
+    sub_layer = "attention.self.key"
+    # sub_layer = "attention.self.value"
+    # sub_layer = "attention.output.dense"
+    # sub_layer = "intermediate.dense"
+    # sub_layer = "output.dense"
 
     baseline_sublayer = get_module_by_name(
         baseline_model.bert.encoder.layer[0],
@@ -245,15 +283,15 @@ def main():
     )
 
     quant_attention_layers = [
-        quant_model.bert.encoder.layer[1].attention.self.query,
-        quant_model.bert.encoder.layer[1].attention.self.key,
-        quant_model.bert.encoder.layer[1].attention.self.value,
-        quant_model.bert.encoder.layer[1].attention.output.dense,
+        quant_model.bert.encoder.layer[0].attention.self.query,
+        quant_model.bert.encoder.layer[0].attention.self.key,
+        quant_model.bert.encoder.layer[0].attention.self.value,
+        quant_model.bert.encoder.layer[0].attention.output.dense,
     ]
 
     quant_ffn_layers = [
-        quant_model.bert.encoder.layer[1].intermediate.dense,
-        quant_model.bert.encoder.layer[1].output.dense,
+        quant_model.bert.encoder.layer[0].intermediate.dense,
+        quant_model.bert.encoder.layer[0].output.dense,
     ]
 
     baseline_tokens, baseline_scores, baseline_logits, inputs = get_topk_predictions(baseline_model, tokenizer, text, k=5)
@@ -278,7 +316,26 @@ def main():
 
     quant_sublayer_activation = capture_activation_for_one_module(quant_model, quant_sublayer, inputs)
 
-    checksum_results = checksum_output(baseline_sublayer_activation, quant_sublayer_activation)
+    # checksum_results = checksum_output(baseline_sublayer_activation, quant_sublayer_activation)
+    baseline_expected_checksum = expected_checksum_linear_output(
+        baseline_check["input"],
+        baseline_check["weight"],
+        baseline_check["bias"],
+        label=f"baseline {sub_layer}"
+    )
+
+    quant_expected_checksum = expected_checksum_linear_output(
+        quant_check["input"],
+        quant_check["weight"],
+        quant_check["bias"],
+        label=f"fake-quantized {sub_layer}"
+    )
+
+    checksum_comparison = compare_expected_checksums(
+        baseline_expected_checksum["expected_checksum"],
+        quant_expected_checksum["expected_checksum"],
+        label=sub_layer
+    )
 
     compare_results(baseline_tokens, baseline_scores, baseline_logits, quant_tokens, quant_scores, quant_logits, baseline_sublayer_activation, quant_sublayer_activation)
 

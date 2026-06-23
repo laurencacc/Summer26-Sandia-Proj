@@ -4,37 +4,48 @@ from transformers import AutoTokenizer, AutoModelForMaskedLM
 import torch
 
 def get_topk_predictions(model, tokenizer, text, k=5):
+    # tokenizes model
     inputs = tokenizer(text, return_tensors="pt")
-    # Find out where 9 is coming from by outputting result as text, potentially mapping values to parts of input text
 
+    # assigns models to ids as a Python list
     input_ids = inputs["input_ids"][0].tolist()
 
+    # converts them into tokens for viewing (readable)
     tokens = tokenizer.convert_ids_to_tokens(input_ids)
 
     print("Tokenized sequence:")
 
+    # printing tokens to view
     for i in range(len(input_ids)):
         token_id = input_ids[i]
         token = tokens[i]
         print(f"Position {i}: token={token}, id={token_id}")
 
+    # running model inference
     with torch.no_grad():
         outputs = model(**inputs)
 
+    # collect logits from output
     logits = outputs.logits
 
     ## Get top-k vocabulary items (MLM head?)
+    # Finds where [MASK] is in sequence
     mask_positions = (inputs["input_ids"] == tokenizer.mask_token_id).nonzero(as_tuple=False)
+    # This takes the first found mask position and gets the sequence index
     mask_index = mask_positions[0,1]
-    # Finds where [MASk] is in sequence
 
+    # saves logits from the mask_index
     mask_logits = logits[0, mask_index, :]
 
+    # finds the k highest scoring vocab entries
     top_values, top_indices = torch.topk(mask_logits, k)
 
+    # turns the top predicted token IDs into readable token strings
     predicted_tokens = tokenizer.convert_ids_to_tokens(top_indices.tolist())
+    # convert to Python list
     predicted_scores = top_values.tolist()
     
+    # returns top k token strings, top k raw logits, full vocab logits for masked position, and tokenized model inputs
     return predicted_tokens, predicted_scores, mask_logits.detach(), inputs
 
 def quantize_linear_weights(layer, num_bits):
@@ -59,7 +70,6 @@ def quantize_linear_weights(layer, num_bits):
         # floating point tensor that approximates quantized weights
 
         layer.weight.data.copy_(dequantized)
-
 
 def capture_activation_for_one_module(model, module, inputs):
     activations = {}
@@ -152,11 +162,12 @@ def compare_results(
 def verify_linear_layer_math(model, module, inputs, label="layer"):
     saved = {}
 
+    # hook input and output of module to look inside
     def hook_fn(module, input, output):
         saved["input"] = input[0].detach()
         saved["output"] = output.detach()
 
-    # attach hook to chosen sublayer (PyTorch command)
+    # attach hook to chosen sublayer (PyTorch command) [register_forward_hook() requires a specific format]
     handle = module.register_forward_hook(hook_fn)
 
     # run model
@@ -172,11 +183,12 @@ def verify_linear_layer_math(model, module, inputs, label="layer"):
     w = module.weight.detach()
     b = module.bias.detach() if module.bias is not None else None
 
+    # X*W^T
     y_manual = torch.matmul(x, w.T)
     if b is not None:
         y_manual = y_manual + b
 
-    diff = (y_actual - y_manual).abs()
+    diff = ((y_actual).abs() - (y_manual).abs()).abs()
     max_diff = diff.max().item()
     mean_diff = diff.mean().item()
 
@@ -185,7 +197,7 @@ def verify_linear_layer_math(model, module, inputs, label="layer"):
     print("Weight shape:", w.shape)
     print("Bias shape:", None if b is None else b.shape)
     print("Output shape:", y_actual.shape)
-    print(f"Manual-vs-actual max abs difference: {max_diff:.10f}")
+    print(f"\nManual-vs-actual max abs difference: {max_diff:.10f}")
     print(f"Manual-vs-actual mean abs difference: {mean_diff:.10f}\n")
 
     return{
@@ -204,6 +216,7 @@ def get_module_by_name(root, module_path):
         module = getattr(module, part)
     return module
 
+# Old way to find checksum (V1)
 # def checksum_output(baseline_output, quant_output):
 #     # We should not expect output, find way to not involve
 #     y = baseline_output.reshape(-1)
@@ -294,32 +307,39 @@ def checksum_difference(baseline_tensor, quant_tensor, label="tensor"):
 
 def main():
 
+    # Create baseline and quant models to compare
     model_name = "/home/lecacca/VSCode Environment/BERT-Testing/bert_uncased_L-2_H-128_A-2"
     baseline_model = AutoModelForMaskedLM.from_pretrained(model_name)
     quant_model = AutoModelForMaskedLM.from_pretrained(model_name)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # prepare for running inference
     baseline_model.eval()
     quant_model.eval()
 
+    # input text
     text = "Paris is the capital of [MASK]."
 
-    # sub_layer = "attention.self.query"
+    # Uncomment the sublayer you want to analyze
+    sub_layer = "attention.self.query"
     # sub_layer = "attention.self.key"
     # sub_layer = "attention.self.value"
     # sub_layer = "attention.output.dense"
     # sub_layer = "intermediate.dense"
-    sub_layer = "output.dense"
+    # sub_layer = "output.dense"
 
+    # analyzes the baseline sublayer
     baseline_sublayer = get_module_by_name(
         baseline_model.bert.encoder.layer[0],
         sub_layer
     )
 
+    # analyzes the quantization sublayer to "quantize"
     quant_sublayer = get_module_by_name(
         quant_model.bert.encoder.layer[0],
         sub_layer
     )
 
+    # these sublayers are grouped to "quantize" all of the linear sublayers
     quant_attention_layers = [
         quant_model.bert.encoder.layer[0].attention.self.query,
         quant_model.bert.encoder.layer[0].attention.self.key,
@@ -332,15 +352,18 @@ def main():
         quant_model.bert.encoder.layer[0].output.dense,
     ]
 
+    # Get top-k (5) predictions for baseline
     baseline_tokens, baseline_scores, baseline_logits, inputs = get_topk_predictions(baseline_model, tokenizer, text, k=5)
     
+    # Verifies the math follows what PyTorch is completing
     baseline_check = verify_linear_layer_math(baseline_model, baseline_sublayer, inputs, label=f"baseline {sub_layer}")
 
     # inspect small slices of these values
-    print(f"input: {baseline_check["input"][0,0,:5]}")
-    print(f"weight: {baseline_check["weight"][:2, :5]}")
-    print(f"actual output: {baseline_check["actual_output"][0,0,:5]}")
+    print(f'input: {baseline_check["input"][0,0,:5]}')
+    print(f'weight: {baseline_check["weight"][:2, :5]}')
+    print(f'actual output: {baseline_check["actual_output"][0,0,:5]}')
 
+    # Captures output tensor produced by sublayer for checksum later
     baseline_sublayer_activation = capture_activation_for_one_module(baseline_model, baseline_sublayer, inputs)
 
     quantize_linear_weights(quant_sublayer, num_bits=8)

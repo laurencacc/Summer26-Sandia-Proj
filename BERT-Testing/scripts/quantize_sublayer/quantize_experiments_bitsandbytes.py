@@ -1,6 +1,7 @@
 # experiment 0: full precision baseline
 # experiment 1: quantize only block0.attention.self.query
-from transformers import AutoTokenizer, AutoModelForMaskedLM 
+from transformers import AutoTokenizer, AutoModelForMaskedLM
+import bitsandbytes as bnb
 import torch
 
 def get_topk_predictions(model, tokenizer, text, k=5):
@@ -18,6 +19,8 @@ def get_topk_predictions(model, tokenizer, text, k=5):
         token = tokens[i]
         print(f"Position {i}: token={token}, id={token_id}")
 
+    inputs = move_inputs_to_model_device(inputs, model)
+
     with torch.no_grad():
         outputs = model(**inputs)
 
@@ -32,10 +35,10 @@ def get_topk_predictions(model, tokenizer, text, k=5):
 
     top_values, top_indices = torch.topk(mask_logits, k)
 
-    predicted_tokens = tokenizer.convert_ids_to_tokens(top_indices.tolist())
-    predicted_scores = top_values.tolist()
+    predicted_tokens = tokenizer.convert_ids_to_tokens(top_indices.detach().cpu().tolist())
+    predicted_scores = top_values.detach().cpu().tolist()
     
-    return predicted_tokens, predicted_scores, mask_logits.detach(), inputs
+    return predicted_tokens, predicted_scores, mask_logits.detach().cpu(), inputs
 
 def quantize_linear_weights(layer, num_bits):
     # manual quantization for testing
@@ -66,7 +69,7 @@ def capture_activation_for_one_module(model, module, inputs):
     # small container to store captured output
 
     def hook_fn(module, input, output):
-        activations["output"] = output.detach()
+        activations["output"] = output.detach().cpu()
         # tensor values only, not training graph info (?)
 
     handle = module.register_forward_hook(hook_fn)
@@ -111,8 +114,8 @@ def compare_results(
     print(f"Mean absolute logit difference: {logit_diff.mean().item():.6f}")
 
     if baseline_activation is not None and quant_activation is not None:
-        b = baseline_activation.reshape(-1)
-        q = quant_activation.reshape(-1)
+        b = baseline_activation.detach().cpu().reshape(-1)
+        q = quant_activation.detach().cpu().reshape(-1)
 
         cosine_sim = torch.nn.functional.cosine_similarity(
             b.unsqueeze(0), q.unsqueeze(0)
@@ -254,19 +257,77 @@ def compare_expected_checksums(baseline_checksum, quant_checksum, label="layer")
         "expected_checksum_difference": checksum_difference, 
     }
 
+def replace_one_linear_with_bnb_8bit(root, module_path):
+    parent_path, child_name = module_path.rsplit(".", 1)
+
+    parent = get_module_by_name(root, parent_path)
+    old_layer = getattr(parent, child_name)
+
+    if not isinstance(old_layer, torch.nn.Linear):
+        raise TypeError(f"{module_path} is not a torch.nn.Linear layer. Got {type(old_layer)}")
+    
+    # replace sublayer with Linear bnb 8-bit layer with this new_layer
+    new_layer = bnb.nn.Linear8bitLt(
+        old_layer.in_features,
+        old_layer.out_features,
+        bias=old_layer.bias is not None,
+        # controls how BitsAndBytes handles weights
+        has_fp16_weights=False,
+    )
+
+    # replacement process:
+    # Copy old layer's parameters into new layer (including weight and bias)
+    new_layer.load_state_dict(old_layer.state_dict())
+    # Put new layer into model: parent."query" = new_layer
+    setattr(parent, child_name, new_layer)
+
+def replace_one_linear_with_bnb_4bit(root, module_path, quant_type="nf4", compute_dtype=torch.float16):
+    parent_path, child_name = module_path.rsplit(".", 1)
+
+    parent = get_module_by_name(root, parent_path)
+    old_layer = getattr(parent, child_name)
+
+    if not isinstance(old_layer, torch.nn.Linear):
+        raise TypeError(f"{module_path} is not a torch.nn.Linear layer. Got {type(old_layer)}")
+    
+    new_layer = bnb.nn.Linear4bit(
+        old_layer.in_features,
+        old_layer.out_features,
+        bias=old_layer.bias is not None,
+        compute_dtype=compute_dtype,
+        has_fp16_weights=False,
+        quant_type=quant_type
+    )
+
+    new_layer.load_state_dict(old_layer.state_dict())
+
+    setattr(parent, child_name, new_layer)
+
+def move_inputs_to_model_device(inputs, model):
+    device = next(model.parameters()).device
+    return {k: v.to(device) for k, v in inputs.items()}
+
 def main():
 
     model_name = "/home/lecacca/VSCode Environment/BERT-Testing/bert_uncased_L-2_H-128_A-2"
+
+    # doing this in main rather than function
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device != "cuda":
+        raise RuntimeError("bitsandbytes Linear8bitLt generally requires CUDA for this experiment.")
+
     baseline_model = AutoModelForMaskedLM.from_pretrained(model_name)
     quant_model = AutoModelForMaskedLM.from_pretrained(model_name)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    baseline_model.to(device)
     baseline_model.eval()
     quant_model.eval()
 
     text = "Paris is the capital of [MASK]."
 
-    # sub_layer = "attention.self.query"
-    sub_layer = "attention.self.key"
+    sub_layer = "attention.self.query"
+    # sub_layer = "attention.self.key"
     # sub_layer = "attention.self.value"
     # sub_layer = "attention.output.dense"
     # sub_layer = "intermediate.dense"
@@ -277,71 +338,41 @@ def main():
         sub_layer
     )
 
-    quant_sublayer = get_module_by_name(
+    baseline_tokens, baseline_scores, baseline_logits, baseline_inputs = get_topk_predictions(baseline_model, tokenizer, text, k=5)
+
+    baseline_sublayer_activation = capture_activation_for_one_module(baseline_model, baseline_sublayer, baseline_inputs)
+
+    # replacing sublayer with linear bnb 8bit layer
+    replace_one_linear_with_bnb_8bit(
         quant_model.bert.encoder.layer[0],
         sub_layer
     )
 
-    quant_attention_layers = [
-        quant_model.bert.encoder.layer[0].attention.self.query,
-        quant_model.bert.encoder.layer[0].attention.self.key,
-        quant_model.bert.encoder.layer[0].attention.self.value,
-        quant_model.bert.encoder.layer[0].attention.output.dense,
-    ]
+    # replace_one_linear_with_bnb_4bit(
+    #     quant_model.bert.encoder.layer[1],
+    #     sub_layer,
+    #     # nf4 is NormalFloat4 which has 16 ways of representations/levels for values
+    #     quant_type="nf4",
+    #     compute_dtype=torch.float16,
+    # )
 
-    quant_ffn_layers = [
-        quant_model.bert.encoder.layer[0].intermediate.dense,
-        quant_model.bert.encoder.layer[0].output.dense,
-    ]
+    quant_model.to(device)
+    quant_model.eval()
 
-    baseline_tokens, baseline_scores, baseline_logits, inputs = get_topk_predictions(baseline_model, tokenizer, text, k=5)
-    
-    baseline_check = verify_linear_layer_math(baseline_model, baseline_sublayer, inputs, label=f"baseline {sub_layer}")
+    quant_sublayer = get_module_by_name(
+        quant_model.bert.encoder.layer[0],
+        sub_layer
+    )   
 
-    # inspect small slices of these values
-    print(f"input: {baseline_check["input"][0,0,:5]}")
-    print(f"weight: {baseline_check["weight"][:2, :5]}")
-    print(f"actual output: {baseline_check["actual_output"][0,0,:5]}")
+    print("\nQuantized sublayer type:")
+    print(f'{type(quant_sublayer)}')
+    print(f'{quant_sublayer}\n')
 
-    baseline_sublayer_activation = capture_activation_for_one_module(baseline_model, baseline_sublayer, inputs)
+    quant_tokens, quant_scores, quant_logits, quant_inputs = get_topk_predictions(quant_model, tokenizer, text, k=5)
 
-    # This script replaces this line
-    # quantize_linear_weights(quant_sublayer, num_bits=8)
-
-    # for layer in quant_attention_layers:
-    #     quantize_linear_weights(layer, num_bits=8)
-
-    quant_check = verify_linear_layer_math(quant_model, quant_sublayer, inputs, label=f"fake-quantized {sub_layer}")
-
-    quant_tokens, quant_scores, quant_logits, _ = get_topk_predictions(quant_model, tokenizer, text, k=5)
-
-    quant_sublayer_activation = capture_activation_for_one_module(quant_model, quant_sublayer, inputs)
-
-    # checksum_results = checksum_output(baseline_sublayer_activation, quant_sublayer_activation)
-    baseline_expected_checksum = expected_checksum_linear_output(
-        baseline_check["input"],
-        baseline_check["weight"],
-        baseline_check["bias"],
-        label=f"baseline {sub_layer}"
-    )
-
-    quant_expected_checksum = expected_checksum_linear_output(
-        quant_check["input"],
-        quant_check["weight"],
-        quant_check["bias"],
-        label=f"fake-quantized {sub_layer}"
-    )
-
-    checksum_comparison = compare_expected_checksums(
-        baseline_expected_checksum["expected_checksum"],
-        quant_expected_checksum["expected_checksum"],
-        label=sub_layer
-    )
+    quant_sublayer_activation = capture_activation_for_one_module(quant_model, quant_sublayer, quant_inputs)
 
     compare_results(baseline_tokens, baseline_scores, baseline_logits, quant_tokens, quant_scores, quant_logits, baseline_sublayer_activation, quant_sublayer_activation)
-
-    parameters_num = count_parameters(baseline_model.bert.encoder.layer[1])
-    print(f"\nParameter count: {parameters_num}")
 
 if __name__ == "__main__":
     main()

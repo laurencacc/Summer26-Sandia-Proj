@@ -5,3 +5,5 @@ torchao
 accelerate
 bitsandbytes
 pandas
+optimum
+auto-gptq

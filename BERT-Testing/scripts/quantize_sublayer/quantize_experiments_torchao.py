@@ -11,17 +11,19 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 def get_topk_predictions(model, tokenizer, text, k=5):
     inputs = tokenizer(text, return_tensors="pt")
     # Find out where 9 is coming from by outputting result as text, potentially mapping values to parts of input text
-    # Take the first parameter in the model and tell me what device it is stored on.
-    device = next(model.parameters()).device
-    inputs = {k: v.to(device) for k, v in inputs.items()}
 
     input_ids = inputs["input_ids"][0].tolist()
 
     tokens = tokenizer.convert_ids_to_tokens(input_ids)
 
     print("Tokenized sequence:")
-    for i, (token_id, token) in enumerate(zip(input_ids,tokens)):
+
+    for i in range(len(input_ids)):
+        token_id = input_ids[i]
+        token = tokens[i]
         print(f"Position {i}: token={token}, id={token_id}")
+
+    inputs = move_inputs_to_model_device(inputs, model)
 
     with torch.no_grad():
         outputs = model(**inputs)
@@ -37,10 +39,10 @@ def get_topk_predictions(model, tokenizer, text, k=5):
 
     top_values, top_indices = torch.topk(mask_logits, k)
 
-    predicted_tokens = tokenizer.convert_ids_to_tokens(top_indices.tolist())
-    predicted_scores = top_values.tolist()
+    predicted_tokens = tokenizer.convert_ids_to_tokens(top_indices.detach().cpu().tolist())
+    predicted_scores = top_values.detach().cpu().tolist()
     
-    return predicted_tokens, predicted_scores, mask_logits.detach(), inputs
+    return predicted_tokens, predicted_scores, mask_logits.detach().cpu(), inputs
 
 def quantize_linear_weights(layer, num_bits):
     # manual quantization for testing
@@ -71,7 +73,7 @@ def capture_activation_for_one_module(model, module, inputs):
     # small container to store captured output
 
     def hook_fn(module, input, output):
-        activations["output"] = output.detach()
+        activations["output"] = output.detach().cpu()
         # tensor values only, not training graph info (?)
 
     handle = module.register_forward_hook(hook_fn)
@@ -116,8 +118,8 @@ def compare_results(
     print(f"Mean absolute logit difference: {logit_diff.mean().item():.6f}")
 
     if baseline_activation is not None and quant_activation is not None:
-        b = baseline_activation.reshape(-1)
-        q = quant_activation.reshape(-1)
+        b = baseline_activation.detach().cpu().float().reshape(-1)
+        q = quant_activation.detach().cpu().float().reshape(-1)
 
         cosine_sim = torch.nn.functional.cosine_similarity(
             b.unsqueeze(0), q.unsqueeze(0)
@@ -135,6 +137,8 @@ def check_code_works():
 
     text = "Paris is the capital of [MASK]."
 
+    # target_block_index=0
+
     baseline_tokens, baseline_scores, baseline_logits, inputs = get_topk_predictions(baseline_model, tokenizer, text, k=5)
 
     # quantize_linear_weights(quant_model.bert.encoder.layer[0].intermediate.dense, num_bits=8)
@@ -151,6 +155,55 @@ def check_code_works():
 
     return True
 
+def set_module_by_name(root, module_path, new_module):
+    parts = module_path.split(".")
+    parent = root
+
+    for part in parts[:-1]:
+        parent = getattr(parent, part)
+
+    setattr(parent, parts[-1], new_module)
+
+def move_inputs_to_model_device(inputs, model):
+    device = next(model.parameters()).device
+    return {k: v.to(device) for k, v in inputs.items()}
+
+def print_module_type(model, block_index, sub_layer, label="model"):
+    module = get_module_by_name(
+        model.bert.encoder.layer[block_index],
+        sub_layer
+    )
+
+    print(f"\n{label}: layer[{block_index}].{sub_layer}")
+    print(type(module))
+    print(module)
+
+def quantize_only_one_sublayer_torchao(model, block_index, sub_layer, config):
+    # Target sublayer
+    target = get_module_by_name(model.bert.encoder.layer[block_index], sub_layer)
+
+    print(f"\nBefore TorchAO quantization:")
+    print(type(target))
+    print(target)
+
+    # Use TorchAO's quantize function
+    quantize_(target, config)
+
+    # see module after quantization
+    new_target = get_module_by_name(model.bert.encoder.layer[block_index], sub_layer)
+
+    print("\nAfter TorchAO quantization:")
+    print(type(new_target))
+    print(new_target)
+
+    return new_target
+
+def get_module_by_name(root, module_path):
+    module = root
+    for part in module_path.split("."):
+        module = getattr(module, part)
+    return module
+
 def main():
 
     model_name = "/home/lecacca/VSCode Environment/BERT-Testing/bert_uncased_L-2_H-128_A-2"
@@ -162,20 +215,24 @@ def main():
 
     text = "Paris is the capital of [MASK]."
 
-    baseline_sublayer = baseline_model.bert.encoder.layer[0].attention.self.query
-    quant_sublayer = quant_model.bert.encoder.layer[0].attention.self.query
+    # setting layer/block of transformer to inspect here
+    target_block_index = 0
+    # sublayer to inspect
+    sub_layer = "attention.self.query"
 
-    quant_attention_layers = [
-        quant_model.bert.encoder.layer[1].attention.self.query,
-        quant_model.bert.encoder.layer[1].attention.self.key,
-        quant_model.bert.encoder.layer[1].attention.self.value,
-        quant_model.bert.encoder.layer[1].attention.output.dense,
-    ]
+    baseline_sublayer = get_module_by_name(
+        baseline_model.bert.encoder.layer[target_block_index],
+        sub_layer
+    )
 
-    quant_ffn_layers = [
-        quant_model.bert.encoder.layer[1].intermediate.dense,
-        quant_model.bert.encoder.layer[1].output.dense,
-    ]
+    quant_sublayer = get_module_by_name(
+        quant_model.bert.encoder.layer[target_block_index],
+        sub_layer
+    )
+
+    # print module type (e.g.  layer[0].attention.self.query, <class 'torch.nn.modules.linear.Linear'>, Linear(in_features=128, out_features=128, bias=True))
+    print_module_type(baseline_model, target_block_index, sub_layer, label="Baseline target")
+    print_module_type(quant_model, target_block_index, sub_layer, label="Quant target before")
 
     baseline_tokens, baseline_scores, baseline_logits, inputs = get_topk_predictions(baseline_model, tokenizer, text, k=5)
     
@@ -183,8 +240,20 @@ def main():
 
     # quantize_linear_weights(quant_sublayer, num_bits=8)
 
-    quantize_(quant_model, Int8WeightOnlyConfig())
-    # Look into code
+    # We want to quantize only one sublayer, look at function for details
+    quantize_only_one_sublayer_torchao(
+        quant_model,
+        block_index = target_block_index,
+        sub_layer = sub_layer,
+        config = Int8WeightOnlyConfig()
+    )
+
+    quant_sublayer = get_module_by_name(
+        quant_model.bert.encoder.layer[target_block_index],
+        sub_layer
+    )
+
+    print_module_type(quant_model, target_block_index, sub_layer, label="Quant target after")
 
     # rabbit hole of inspecting
     # print(inspect.getsource(quant_api._int8_weight_only_quantize_tensor))
@@ -201,9 +270,8 @@ def main():
 
     compare_results(baseline_tokens, baseline_scores, baseline_logits, quant_tokens, quant_scores, quant_logits, baseline_sublayer_activation, quant_sublayer_activation)
 
-    parameters_num = count_parameters(baseline_model.bert.encoder.layer[1])
-    print(f"\nParameter count: {parameters_num}")
+    # parameters_num = count_parameters(baseline_model.bert.encoder.layer[0])
+    # print(f"\nParameter count: {parameters_num}")
 
 if __name__ == "__main__":
-    check_code_works()
     main()

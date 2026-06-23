@@ -1,7 +1,8 @@
 # experiment 0: full precision baseline
 # experiment 1: quantize only block0.attention.self.query
-from transformers import AutoTokenizer, AutoModelForMaskedLM 
+from transformers import AutoTokenizer, AutoModelForMaskedLM, GPTQConfig 
 import torch
+import copy
 
 def get_topk_predictions(model, tokenizer, text, k=5):
     inputs = tokenizer(text, return_tensors="pt")
@@ -18,6 +19,8 @@ def get_topk_predictions(model, tokenizer, text, k=5):
         token = tokens[i]
         print(f"Position {i}: token={token}, id={token_id}")
 
+    inputs = move_inputs_to_model_device(inputs, model)
+
     with torch.no_grad():
         outputs = model(**inputs)
 
@@ -32,10 +35,10 @@ def get_topk_predictions(model, tokenizer, text, k=5):
 
     top_values, top_indices = torch.topk(mask_logits, k)
 
-    predicted_tokens = tokenizer.convert_ids_to_tokens(top_indices.tolist())
-    predicted_scores = top_values.tolist()
+    predicted_tokens = tokenizer.convert_ids_to_tokens(top_indices.detach().cpu().tolist())
+    predicted_scores = top_values.detach().cpu().tolist()
     
-    return predicted_tokens, predicted_scores, mask_logits.detach(), inputs
+    return predicted_tokens, predicted_scores, mask_logits.detach().cpu(), inputs
 
 def quantize_linear_weights(layer, num_bits):
     # manual quantization for testing
@@ -106,13 +109,16 @@ def compare_results(
     print(f"\nTop-1 match: {top1_match}")
     print(f"Top-5 overlap: {top5_overlap}/5")
 
+    baseline_logits = baseline_logits.detach().cpu().float()
+    quant_logits = quant_logits.detach().cpu().float()
+
     logit_diff = (baseline_logits - quant_logits).abs()
     print(f"Max absolute logit difference: {logit_diff.max().item():.6f}")
     print(f"Mean absolute logit difference: {logit_diff.mean().item():.6f}")
 
     if baseline_activation is not None and quant_activation is not None:
-        b = baseline_activation.reshape(-1)
-        q = quant_activation.reshape(-1)
+        b = baseline_activation.detach().cpu().float().reshape(-1)
+        q = quant_activation.detach().cpu().float().reshape(-1)
 
         cosine_sim = torch.nn.functional.cosine_similarity(
             b.unsqueeze(0), q.unsqueeze(0)
@@ -254,94 +260,167 @@ def compare_expected_checksums(baseline_checksum, quant_checksum, label="layer")
         "expected_checksum_difference": checksum_difference, 
     }
 
+def set_module_by_name(root, module_path, new_module):
+    parts = module_path.split(".")
+    parent = root
+
+    for part in parts[:-1]:
+        parent = getattr(parent, part)
+
+    setattr(parent, parts[-1], new_module)
+
+def move_inputs_to_model_device(inputs, model):
+    device = next(model.parameters()).device
+    return {k: v.to(device) for k, v in inputs.items()}
+
+def print_module_type(model, block_index, sub_layer, label="model"):
+    module = get_module_by_name(
+        model.bert.encoder.layer[block_index],
+        sub_layer
+    )
+
+    print(f"\n{label}: layer[{block_index}].{sub_layer}")
+    print(type(module))
+    print(module)
+
+def restore_same_sublayer_except_target_block(
+        quant_model,
+        baseline_model,
+        sub_layer,
+        target_block_index,
+    ):
+
+    # count the number of encoder layers
+    num_layers = len(quant_model.bert.encoder.layer)
+
+    # loop over block index until it is the target block
+    for block_index in range(num_layers):
+        if block_index == target_block_index:
+            continue
+
+        # get baseline sublayer
+        baseline_layer = get_module_by_name(
+            baseline_model.bert.encoder.layer[block_index],
+            sub_layer,
+        )
+
+        # deepcopy of baseline layer (allows for independent copy)
+        restored_layer = copy.deepcopy(baseline_layer)
+
+        device = next(quant_model.parameters()).device
+        restored_layer.to(device)
+
+        # replace sublayer in quantized model
+        set_module_by_name(
+            quant_model.bert.encoder.layer[block_index],
+            sub_layer,
+            restored_layer,
+        )
+
 def main():
 
     model_name = "/home/lecacca/VSCode Environment/BERT-Testing/bert_uncased_L-2_H-128_A-2"
     baseline_model = AutoModelForMaskedLM.from_pretrained(model_name)
-    quant_model = AutoModelForMaskedLM.from_pretrained(model_name)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    baseline_model.eval()
-    quant_model.eval()
 
     text = "Paris is the capital of [MASK]."
 
-    # sub_layer = "attention.self.query"
-    sub_layer = "attention.self.key"
+    target_block_index = 0
+
+    sub_layer = "attention.self.query"
+    # sub_layer = "attention.self.key"
     # sub_layer = "attention.self.value"
     # sub_layer = "attention.output.dense"
     # sub_layer = "intermediate.dense"
     # sub_layer = "output.dense"
 
+    calibration_texts = [
+        "Paris is the capital of [MASK].",
+        "The sky is [MASK].",
+        "My name is [MASK].",
+        "The dog is very [MASK].",
+        "A computer can process [MASK].",
+        "Water is a [MASK].",
+        "The sun is very [MASK].",
+        "She opened the [MASK].",
+        "He went to the [MASK].",
+        "The book is on the [MASK].",
+    ]
+
+    # GPT-Q required that we pass a dataset in order to configure
+    gptq_config = GPTQConfig(
+        bits=8,
+        dataset=calibration_texts,
+        tokenizer=tokenizer,
+        group_size=128,
+
+        # does not quantize activation inputs in specific order
+        desc_act=False,
+
+        # symmetric quantization
+        sym=True,
+
+        block_name_to_quantize = "bert.encoder.layer",
+
+        modules_in_block_to_quantize = [
+            ["attention.self.query"]
+        ],
+    )
+
+    quant_model = AutoModelForMaskedLM.from_pretrained(
+        model_name,
+        quantization_config = gptq_config,
+        # tells HuggingFace where to automatically put model components (GPU vs CPU)
+        device_map = "auto",
+    )
+
+    quant_model.eval()
+
+    # restores layer that isn't being quantized
+    restore_same_sublayer_except_target_block(
+        quant_model=quant_model,
+        baseline_model=baseline_model,
+        sub_layer=sub_layer,
+        target_block_index=target_block_index,
+    )
+
+    print_module_type(
+        quant_model,
+        target_block_index,
+        sub_layer,
+        label="GPTQ target layer"
+    )
+
+    print_module_type(
+        quant_model,
+        1,
+        sub_layer,
+        label="Other block after restore"
+    )
+
+    baseline_model.to(next(quant_model.parameters()).device)
+    baseline_model.eval()
+
     baseline_sublayer = get_module_by_name(
-        baseline_model.bert.encoder.layer[0],
+        baseline_model.bert.encoder.layer[target_block_index],
         sub_layer
     )
 
     quant_sublayer = get_module_by_name(
-        quant_model.bert.encoder.layer[0],
+        quant_model.bert.encoder.layer[target_block_index],
         sub_layer
     )
 
-    quant_attention_layers = [
-        quant_model.bert.encoder.layer[0].attention.self.query,
-        quant_model.bert.encoder.layer[0].attention.self.key,
-        quant_model.bert.encoder.layer[0].attention.self.value,
-        quant_model.bert.encoder.layer[0].attention.output.dense,
-    ]
-
-    quant_ffn_layers = [
-        quant_model.bert.encoder.layer[0].intermediate.dense,
-        quant_model.bert.encoder.layer[0].output.dense,
-    ]
-
     baseline_tokens, baseline_scores, baseline_logits, inputs = get_topk_predictions(baseline_model, tokenizer, text, k=5)
-    
-    baseline_check = verify_linear_layer_math(baseline_model, baseline_sublayer, inputs, label=f"baseline {sub_layer}")
-
-    # inspect small slices of these values
-    print(f"input: {baseline_check["input"][0,0,:5]}")
-    print(f"weight: {baseline_check["weight"][:2, :5]}")
-    print(f"actual output: {baseline_check["actual_output"][0,0,:5]}")
 
     baseline_sublayer_activation = capture_activation_for_one_module(baseline_model, baseline_sublayer, inputs)
-
-    # This script replaces this line
-    # quantize_linear_weights(quant_sublayer, num_bits=8)
-
-    # for layer in quant_attention_layers:
-    #     quantize_linear_weights(layer, num_bits=8)
-
-    quant_check = verify_linear_layer_math(quant_model, quant_sublayer, inputs, label=f"fake-quantized {sub_layer}")
 
     quant_tokens, quant_scores, quant_logits, _ = get_topk_predictions(quant_model, tokenizer, text, k=5)
 
     quant_sublayer_activation = capture_activation_for_one_module(quant_model, quant_sublayer, inputs)
 
-    # checksum_results = checksum_output(baseline_sublayer_activation, quant_sublayer_activation)
-    baseline_expected_checksum = expected_checksum_linear_output(
-        baseline_check["input"],
-        baseline_check["weight"],
-        baseline_check["bias"],
-        label=f"baseline {sub_layer}"
-    )
-
-    quant_expected_checksum = expected_checksum_linear_output(
-        quant_check["input"],
-        quant_check["weight"],
-        quant_check["bias"],
-        label=f"fake-quantized {sub_layer}"
-    )
-
-    checksum_comparison = compare_expected_checksums(
-        baseline_expected_checksum["expected_checksum"],
-        quant_expected_checksum["expected_checksum"],
-        label=sub_layer
-    )
-
     compare_results(baseline_tokens, baseline_scores, baseline_logits, quant_tokens, quant_scores, quant_logits, baseline_sublayer_activation, quant_sublayer_activation)
 
-    parameters_num = count_parameters(baseline_model.bert.encoder.layer[1])
-    print(f"\nParameter count: {parameters_num}")
 
 if __name__ == "__main__":
     main()

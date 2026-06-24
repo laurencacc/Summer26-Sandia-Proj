@@ -188,7 +188,7 @@ def verify_linear_layer_math(model, module, inputs, label="layer"):
     if b is not None:
         y_manual = y_manual + b
 
-    diff = ((y_actual).abs() - (y_manual).abs()).abs()
+    diff = ((y_actual) - (y_manual)).abs()
     max_diff = diff.max().item()
     mean_diff = diff.mean().item()
 
@@ -241,68 +241,53 @@ def get_module_by_name(root, module_path):
 #         "checksum_error": checksum_error,
 #     }
 
-def expected_checksum_linear_output(input_tensor, weight, bias, label="layer"):
+def full_recompute_expected_output_checksum(input_tensor, weight, bias, label="layer"):
     expected_output = torch.matmul(input_tensor, weight.T)
     if bias is not None:
         expected_output = expected_output + bias
     
-    y_expected = expected_output.reshape(-1)
-    checksum_expected = y_expected.sum().abs().item()
-
-    # print(f"\nExpected checksum for {label}:")
-    # print(f"Expected checksum: {checksum_expected:.10f}")
-
+    checksum_expected = expected_output.reshape(-1).sum().item()
+    # Change is absolute value so no values cancel
+    expected_output_l1_magnitude = expected_output.reshape(-1).abs().sum().item()
+    
     return{
         "expected_checksum": checksum_expected,
         "expected_output": expected_output,
+        "expected_output_l1_magnitude": expected_output_l1_magnitude,
     }
 
-def compare_expected_checksums(baseline_checksum, quant_checksum, label="layer"):
-    checksum_difference = abs(quant_checksum - baseline_checksum)
-    # fix this ^
+def compare_expected_checksum_drift(baseline_checksum, quant_checksum, baseline_expected_output_l1_magnitude=None, label="layer", eps=1e-12):
+    signed_drift = (quant_checksum - baseline_checksum)
+    abs_drift = abs(signed_drift)
+    rel_drift_to_baseline_checksum = abs_drift / (abs(baseline_checksum)+eps)
 
-    # print(f"\nExpected checksum comparison for {label}")
-    # print(f"Baseline expected checksum: {baseline_checksum:.10f}")
-    # print(f"Quantized expected checksum: {quant_checksum:.10f}")
-    # print(f"Expected checksum difference: {checksum_difference:.10f}")
+    if baseline_expected_output_l1_magnitude is not None:
+        rel_drift_to_expected_output_l1 = (
+            abs_drift / (baseline_expected_output_l1_magnitude + eps)
+        )
+    else:
+        rel_drift_to_expected_output_l1 = None
+
+    print(f"\nExpected checksum comparison for {label}")
+    print(f"Baseline expected checksum: {baseline_checksum:.10f}")
+    print(f"Quantized expected checksum: {quant_checksum:.10f}")
+    print(f"Signed expected checksum drift: {signed_drift:.10f}")
+    print(f"Absolute expected checksum drift: {abs_drift:.10f}")
+    print(f"Relative expected checksum drift to baseline: {rel_drift_to_baseline_checksum:.10f}")
+
+    if rel_drift_to_expected_output_l1 is not None:
+        print(
+            "Relative drift to expected output L1 magnitude: "
+            f"{rel_drift_to_expected_output_l1:.10f}"
+        )
 
     return{
         "baseline_expected_checksum": baseline_checksum,
         "quant_expected_checksum": quant_checksum,
-        "expected_checksum_difference": checksum_difference, 
-    }
-
-def checksum_difference(baseline_tensor, quant_tensor, label="tensor"):
-    b = baseline_tensor.detach().reshape(-1)
-    q = quant_tensor.detach().reshape(-1)
-
-    baseline_sum = b.sum().item()
-    quant_sum = q.sum().item()
-
-    signed_checksum_diff = abs(q.sum().item()-b.sum().item())
-    error_checksum = (q-b).abs().sum().item()
-    baseline_magnitude = b.abs().sum().item()
-
-    baseline_sum_magnitude = abs(baseline_sum)
-    relative_signed_checksum_diff = (
-        signed_checksum_diff / baseline_sum_magnitude
-        if baseline_magnitude!=0
-        else float("nan")
-    )
-
-    relative_error_checksum = error_checksum / baseline_magnitude if baseline_magnitude != 0 else float("nan")
-
-    print(f"\nChecksum comparison for {label}:")
-    print(f"|sum(quant) - sum(baseline)|: {signed_checksum_diff:.10f}")
-    print(f"sum(abs(quant - baseline)): {error_checksum:.10f}")
-    print(f"relative sum(abs(error)): {relative_error_checksum:.10f}")
-    print(f"relative |sum(quant) - sum(baseline)|: {relative_signed_checksum_diff:.10f}")
-
-    return {
-        "signed_checksum_diff": signed_checksum_diff,
-        "error_checksum": error_checksum,
-        "relative_error_checksum": relative_error_checksum,
-        "relative_signed_checksum_diff": relative_signed_checksum_diff
+        "signed_expected_checksum_drift": signed_drift,
+        "abs_expected_checksum_drift": abs_drift,
+        "rel_drift_to_baseline_checksum": rel_drift_to_baseline_checksum,
+        "rel_drift_to_expected_output_l1": rel_drift_to_expected_output_l1,
     }
 
 def main():
@@ -320,22 +305,22 @@ def main():
     text = "Paris is the capital of [MASK]."
 
     # Uncomment the sublayer you want to analyze
-    sub_layer = "attention.self.query"
+    # sub_layer = "attention.self.query"
     # sub_layer = "attention.self.key"
-    # sub_layer = "attention.self.value"
+    sub_layer = "attention.self.value"
     # sub_layer = "attention.output.dense"
     # sub_layer = "intermediate.dense"
     # sub_layer = "output.dense"
 
     # analyzes the baseline sublayer
     baseline_sublayer = get_module_by_name(
-        baseline_model.bert.encoder.layer[0],
+        baseline_model.bert.encoder.layer[1],
         sub_layer
     )
 
     # analyzes the quantization sublayer to "quantize"
     quant_sublayer = get_module_by_name(
-        quant_model.bert.encoder.layer[0],
+        quant_model.bert.encoder.layer[1],
         sub_layer
     )
 
@@ -377,36 +362,43 @@ def main():
 
     quant_sublayer_activation = capture_activation_for_one_module(quant_model, quant_sublayer, inputs)
 
-    sublayer_checksum = checksum_difference(
-    baseline_sublayer_activation,
-    quant_sublayer_activation,
-    label=f"{sub_layer} output"
-    )
+    # # This measures how much of the selected sublayer's activation changed under quantization (drift measurement)
+    # sublayer_checksum = all_ones_checksum_drift(
+    # baseline_sublayer_activation,
+    # quant_sublayer_activation,
+    # label=f"{sub_layer} output"
+    # )
 
-    mask_logits_checksum = checksum_difference(
-        baseline_logits,
-        quant_logits,
-        label="[MASK] logits"
-    )
+    # # Measuring how much of the final masked-token logit vector changed under quantization (drift measurement)
+    # mask_logits_checksum = all_ones_checksum_drift(
+    #     baseline_logits,
+    #     quant_logits,
+    #     label="[MASK] logits"
+    # )
+
+    X = baseline_check["input"]
 
     # checksum_results = checksum_output(baseline_sublayer_activation, quant_sublayer_activation)
-    baseline_expected_checksum = expected_checksum_linear_output(
-        baseline_check["input"],
+    baseline_expected_checksum = full_recompute_expected_output_checksum(
+        X,
         baseline_check["weight"],
         baseline_check["bias"],
         label=f"baseline {sub_layer}"
     )
 
-    quant_expected_checksum = expected_checksum_linear_output(
-        quant_check["input"],
+    quant_expected_checksum = full_recompute_expected_output_checksum(
+        X,
         quant_check["weight"],
         quant_check["bias"],
         label=f"fake-quantized {sub_layer}"
     )
 
-    checksum_comparison = compare_expected_checksums(
+    checksum_comparison = compare_expected_checksum_drift(
         baseline_expected_checksum["expected_checksum"],
         quant_expected_checksum["expected_checksum"],
+        baseline_expected_output_l1_magnitude=baseline_expected_checksum[
+            "expected_output_l1_magnitude"
+        ],
         label=sub_layer
     )
 

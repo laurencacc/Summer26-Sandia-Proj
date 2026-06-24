@@ -1,0 +1,114 @@
+nohup: ignoring input
+W0622 14:06:33.964000 953615 torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+W0622 14:06:33.990000 953615 torch/utils/_pytree.py:630] <enum 'ScaleCalculationMode'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+Using device: cuda
+Loading model: /home/lecacca/VSCode Environment/BERT-Testing/bert_uncased_L-2_H-128_A-2
+Loading weights:   0%|          | 0/42 [00:00<?, ?it/s]Loading weights: 100%|██████████| 42/42 [00:00<00:00, 9278.46it/s]
+[transformers] [1mBertForMaskedLM LOAD REPORT[0m from: /home/lecacca/VSCode Environment/BERT-Testing/bert_uncased_L-2_H-128_A-2
+Key                         | Status     |  | 
+----------------------------+------------+--+-
+cls.seq_relationship.weight | UNEXPECTED |  | 
+bert.pooler.dense.weight    | UNEXPECTED |  | 
+cls.seq_relationship.bias   | UNEXPECTED |  | 
+bert.pooler.dense.bias      | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+[1/96] text='Paris is the capital of [MASK].', bits=8, block=layer[0], target=attention.self.query
+[2/96] text='Paris is the capital of [MASK].', bits=8, block=layer[0], target=attention.self.key
+[3/96] text='Paris is the capital of [MASK].', bits=8, block=layer[0], target=attention.self.value
+[4/96] text='Paris is the capital of [MASK].', bits=8, block=layer[0], target=attention.output.dense
+[5/96] text='Paris is the capital of [MASK].', bits=8, block=layer[0], target=intermediate.dense
+[6/96] text='Paris is the capital of [MASK].', bits=8, block=layer[0], target=output.dense
+[7/96] text='Paris is the capital of [MASK].', bits=8, block=layer[0], target=Attention layers
+[8/96] text='Paris is the capital of [MASK].', bits=8, block=layer[0], target=FFN layers
+[9/96] text='Paris is the capital of [MASK].', bits=8, block=layer[1], target=attention.self.query
+[10/96] text='Paris is the capital of [MASK].', bits=8, block=layer[1], target=attention.self.key
+[11/96] text='Paris is the capital of [MASK].', bits=8, block=layer[1], target=attention.self.value
+[12/96] text='Paris is the capital of [MASK].', bits=8, block=layer[1], target=attention.output.dense
+[13/96] text='Paris is the capital of [MASK].', bits=8, block=layer[1], target=intermediate.dense
+[14/96] text='Paris is the capital of [MASK].', bits=8, block=layer[1], target=output.dense
+[15/96] text='Paris is the capital of [MASK].', bits=8, block=layer[1], target=Attention layers
+[16/96] text='Paris is the capital of [MASK].', bits=8, block=layer[1], target=FFN layers
+[17/96] text='Paris is the capital of [MASK].', bits=4, block=layer[0], target=attention.self.query
+[18/96] text='Paris is the capital of [MASK].', bits=4, block=layer[0], target=attention.self.key
+[19/96] text='Paris is the capital of [MASK].', bits=4, block=layer[0], target=attention.self.value
+[20/96] text='Paris is the capital of [MASK].', bits=4, block=layer[0], target=attention.output.dense
+[21/96] text='Paris is the capital of [MASK].', bits=4, block=layer[0], target=intermediate.dense
+[22/96] text='Paris is the capital of [MASK].', bits=4, block=layer[0], target=output.dense
+[23/96] text='Paris is the capital of [MASK].', bits=4, block=layer[0], target=Attention layers
+[24/96] text='Paris is the capital of [MASK].', bits=4, block=layer[0], target=FFN layers
+[25/96] text='Paris is the capital of [MASK].', bits=4, block=layer[1], target=attention.self.query
+[26/96] text='Paris is the capital of [MASK].', bits=4, block=layer[1], target=attention.self.key
+[27/96] text='Paris is the capital of [MASK].', bits=4, block=layer[1], target=attention.self.value
+[28/96] text='Paris is the capital of [MASK].', bits=4, block=layer[1], target=attention.output.dense
+[29/96] text='Paris is the capital of [MASK].', bits=4, block=layer[1], target=intermediate.dense
+[30/96] text='Paris is the capital of [MASK].', bits=4, block=layer[1], target=output.dense
+[31/96] text='Paris is the capital of [MASK].', bits=4, block=layer[1], target=Attention layers
+[32/96] text='Paris is the capital of [MASK].', bits=4, block=layer[1], target=FFN layers
+[33/96] text='The sky is [MASK].', bits=8, block=layer[0], target=attention.self.query
+[34/96] text='The sky is [MASK].', bits=8, block=layer[0], target=attention.self.key
+[35/96] text='The sky is [MASK].', bits=8, block=layer[0], target=attention.self.value
+[36/96] text='The sky is [MASK].', bits=8, block=layer[0], target=attention.output.dense
+[37/96] text='The sky is [MASK].', bits=8, block=layer[0], target=intermediate.dense
+[38/96] text='The sky is [MASK].', bits=8, block=layer[0], target=output.dense
+[39/96] text='The sky is [MASK].', bits=8, block=layer[0], target=Attention layers
+[40/96] text='The sky is [MASK].', bits=8, block=layer[0], target=FFN layers
+[41/96] text='The sky is [MASK].', bits=8, block=layer[1], target=attention.self.query
+[42/96] text='The sky is [MASK].', bits=8, block=layer[1], target=attention.self.key
+[43/96] text='The sky is [MASK].', bits=8, block=layer[1], target=attention.self.value
+[44/96] text='The sky is [MASK].', bits=8, block=layer[1], target=attention.output.dense
+[45/96] text='The sky is [MASK].', bits=8, block=layer[1], target=intermediate.dense
+[46/96] text='The sky is [MASK].', bits=8, block=layer[1], target=output.dense
+[47/96] text='The sky is [MASK].', bits=8, block=layer[1], target=Attention layers
+[48/96] text='The sky is [MASK].', bits=8, block=layer[1], target=FFN layers
+[49/96] text='The sky is [MASK].', bits=4, block=layer[0], target=attention.self.query
+[50/96] text='The sky is [MASK].', bits=4, block=layer[0], target=attention.self.key
+[51/96] text='The sky is [MASK].', bits=4, block=layer[0], target=attention.self.value
+[52/96] text='The sky is [MASK].', bits=4, block=layer[0], target=attention.output.dense
+[53/96] text='The sky is [MASK].', bits=4, block=layer[0], target=intermediate.dense
+[54/96] text='The sky is [MASK].', bits=4, block=layer[0], target=output.dense
+[55/96] text='The sky is [MASK].', bits=4, block=layer[0], target=Attention layers
+[56/96] text='The sky is [MASK].', bits=4, block=layer[0], target=FFN layers
+[57/96] text='The sky is [MASK].', bits=4, block=layer[1], target=attention.self.query
+[58/96] text='The sky is [MASK].', bits=4, block=layer[1], target=attention.self.key
+[59/96] text='The sky is [MASK].', bits=4, block=layer[1], target=attention.self.value
+[60/96] text='The sky is [MASK].', bits=4, block=layer[1], target=attention.output.dense
+[61/96] text='The sky is [MASK].', bits=4, block=layer[1], target=intermediate.dense
+[62/96] text='The sky is [MASK].', bits=4, block=layer[1], target=output.dense
+[63/96] text='The sky is [MASK].', bits=4, block=layer[1], target=Attention layers
+[64/96] text='The sky is [MASK].', bits=4, block=layer[1], target=FFN layers
+[65/96] text='My name is [MASK].', bits=8, block=layer[0], target=attention.self.query
+[66/96] text='My name is [MASK].', bits=8, block=layer[0], target=attention.self.key
+[67/96] text='My name is [MASK].', bits=8, block=layer[0], target=attention.self.value
+[68/96] text='My name is [MASK].', bits=8, block=layer[0], target=attention.output.dense
+[69/96] text='My name is [MASK].', bits=8, block=layer[0], target=intermediate.dense
+[70/96] text='My name is [MASK].', bits=8, block=layer[0], target=output.dense
+[71/96] text='My name is [MASK].', bits=8, block=layer[0], target=Attention layers
+[72/96] text='My name is [MASK].', bits=8, block=layer[0], target=FFN layers
+[73/96] text='My name is [MASK].', bits=8, block=layer[1], target=attention.self.query
+[74/96] text='My name is [MASK].', bits=8, block=layer[1], target=attention.self.key
+[75/96] text='My name is [MASK].', bits=8, block=layer[1], target=attention.self.value
+[76/96] text='My name is [MASK].', bits=8, block=layer[1], target=attention.output.dense
+[77/96] text='My name is [MASK].', bits=8, block=layer[1], target=intermediate.dense
+[78/96] text='My name is [MASK].', bits=8, block=layer[1], target=output.dense
+[79/96] text='My name is [MASK].', bits=8, block=layer[1], target=Attention layers
+[80/96] text='My name is [MASK].', bits=8, block=layer[1], target=FFN layers
+[81/96] text='My name is [MASK].', bits=4, block=layer[0], target=attention.self.query
+[82/96] text='My name is [MASK].', bits=4, block=layer[0], target=attention.self.key
+[83/96] text='My name is [MASK].', bits=4, block=layer[0], target=attention.self.value
+[84/96] text='My name is [MASK].', bits=4, block=layer[0], target=attention.output.dense
+[85/96] text='My name is [MASK].', bits=4, block=layer[0], target=intermediate.dense
+[86/96] text='My name is [MASK].', bits=4, block=layer[0], target=output.dense
+[87/96] text='My name is [MASK].', bits=4, block=layer[0], target=Attention layers
+[88/96] text='My name is [MASK].', bits=4, block=layer[0], target=FFN layers
+[89/96] text='My name is [MASK].', bits=4, block=layer[1], target=attention.self.query
+[90/96] text='My name is [MASK].', bits=4, block=layer[1], target=attention.self.key
+[91/96] text='My name is [MASK].', bits=4, block=layer[1], target=attention.self.value
+[92/96] text='My name is [MASK].', bits=4, block=layer[1], target=attention.output.dense
+[93/96] text='My name is [MASK].', bits=4, block=layer[1], target=intermediate.dense
+[94/96] text='My name is [MASK].', bits=4, block=layer[1], target=output.dense
+[95/96] text='My name is [MASK].', bits=4, block=layer[1], target=Attention layers
+[96/96] text='My name is [MASK].', bits=4, block=layer[1], target=FFN layers
+
+Done. Results written to: quantization_results.tsv

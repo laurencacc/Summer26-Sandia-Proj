@@ -218,7 +218,7 @@ def main():
     # setting layer/block of transformer to inspect here
     target_block_index = 0
     # sublayer to inspect
-    sub_layer = "attention.self.query"
+    sub_layer = "output.dense"
 
     baseline_sublayer = get_module_by_name(
         baseline_model.bert.encoder.layer[target_block_index],

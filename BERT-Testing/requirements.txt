@@ -7,3 +7,6 @@ bitsandbytes
 pandas
 optimum
 auto-gptq
+jupyter
+matplotlib
+seaborn

@@ -293,7 +293,7 @@ def compare_expected_checksum_drift(baseline_checksum, quant_checksum, baseline_
 def main():
 
     # Create baseline and quant models to compare
-    model_name = "/home/lecacca/VSCode Environment/BERT-Testing/bert_uncased_L-2_H-128_A-2"
+    model_name = "/home/lecacca/VSCode Environment/BERT-Testing/bert-mini"
     baseline_model = AutoModelForMaskedLM.from_pretrained(model_name)
     quant_model = AutoModelForMaskedLM.from_pretrained(model_name)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -301,40 +301,57 @@ def main():
     baseline_model.eval()
     quant_model.eval()
 
+    block_index = 0
+
     # input text
     text = "Paris is the capital of [MASK]."
 
     # Uncomment the sublayer you want to analyze
     # sub_layer = "attention.self.query"
     # sub_layer = "attention.self.key"
-    sub_layer = "attention.self.value"
+    # sub_layer = "attention.self.value"
     # sub_layer = "attention.output.dense"
     # sub_layer = "intermediate.dense"
-    # sub_layer = "output.dense"
+    sub_layer = "output.dense"
 
     # analyzes the baseline sublayer
     baseline_sublayer = get_module_by_name(
-        baseline_model.bert.encoder.layer[1],
+        baseline_model.bert.encoder.layer[block_index],
         sub_layer
     )
 
     # analyzes the quantization sublayer to "quantize"
     quant_sublayer = get_module_by_name(
-        quant_model.bert.encoder.layer[1],
+        quant_model.bert.encoder.layer[block_index],
         sub_layer
     )
 
+    measurement_sub_layer = "output.dense"
+
+    # analyzes the baseline sublayer
+    baseline_measurement_sublayer = get_module_by_name(
+        baseline_model.bert.encoder.layer[block_index],
+        measurement_sub_layer
+    )
+
+    # analyzes the quantization sublayer to "quantize"
+    quant_measurement_sublayer = get_module_by_name(
+        quant_model.bert.encoder.layer[block_index],
+        measurement_sub_layer
+    )
+
+
     # these sublayers are grouped to "quantize" all of the linear sublayers
     quant_attention_layers = [
-        quant_model.bert.encoder.layer[0].attention.self.query,
-        quant_model.bert.encoder.layer[0].attention.self.key,
-        quant_model.bert.encoder.layer[0].attention.self.value,
-        quant_model.bert.encoder.layer[0].attention.output.dense,
+        quant_model.bert.encoder.layer[block_index].attention.self.query,
+        quant_model.bert.encoder.layer[block_index].attention.self.key,
+        quant_model.bert.encoder.layer[block_index].attention.self.value,
+        quant_model.bert.encoder.layer[block_index].attention.output.dense,
     ]
 
     quant_ffn_layers = [
-        quant_model.bert.encoder.layer[0].intermediate.dense,
-        quant_model.bert.encoder.layer[0].output.dense,
+        quant_model.bert.encoder.layer[block_index].intermediate.dense,
+        quant_model.bert.encoder.layer[block_index].output.dense,
     ]
 
     # Get top-k (5) predictions for baseline
@@ -400,6 +417,43 @@ def main():
             "expected_output_l1_magnitude"
         ],
         label=sub_layer
+    )
+
+    baseline_measurement_check = verify_linear_layer_math(
+        baseline_model,
+        baseline_measurement_sublayer,
+        inputs,
+        label=f"baseline measurement {measurement_sub_layer}"
+    )
+
+    quant_measurement_check = verify_linear_layer_math(
+        quant_model,
+        quant_measurement_sublayer,
+        inputs,
+        label=f"quant measurement {measurement_sub_layer}"
+    )
+
+    baseline_measurement_expected = full_recompute_expected_output_checksum(
+        baseline_measurement_check["input"],
+        baseline_measurement_check["weight"],
+        baseline_measurement_check["bias"],
+        label=f"baseline measurement {measurement_sub_layer}"
+    )
+
+    quant_measurement_expected = full_recompute_expected_output_checksum(
+        quant_measurement_check["input"],
+        quant_measurement_check["weight"],
+        quant_measurement_check["bias"],
+        label=f"quant measurement {measurement_sub_layer}"
+    )
+
+    measurement_checksum_comparison = compare_expected_checksum_drift(
+        baseline_measurement_expected["expected_checksum"],
+        quant_measurement_expected["expected_checksum"],
+        baseline_expected_output_l1_magnitude=baseline_measurement_expected[
+            "expected_output_l1_magnitude"
+        ],
+        label=f"measurement at {measurement_sub_layer} after quantizing {sub_layer}"
     )
 
     print(f"\n")

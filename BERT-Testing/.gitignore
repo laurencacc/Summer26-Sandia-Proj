@@ -1,4 +1,3 @@
-.venv/
 .venv-torchao/
 scripts/quant_experiment_log.txt
 scripts/run_all_quant_experiments.py
@@ -6,5 +5,10 @@ scripts/notes.md
 scripts/analyze_quantization_results.py
 scripts/quantization_results.tsv
 extra/
-visualization/results
-visualization/jupyter_slurm.sbatch
+visualization/scatter_plot/results
+visualization/scatter_plot_torchao/results
+visualization/scatter_plot_bitsandbytes/results
+visualization/scatter_plot/scatter_plot.sbatch
+visualization/scatter_plot_torchao/scatter_plot_torchao.sbatch
+visualization/scatter_plot_bitsandbytes/scatter_plot_bitsandbytes.sbatch
+visualization/compare_torchao_and_bitsandbytes/results

@@ -5,6 +5,8 @@ import torch
 from torchao.quantization import quantize_, Int8WeightOnlyConfig, Int4WeightOnlyConfig
 import inspect
 import torchao.quantization.quant_api as quant_api
+from torchao.quantization import IntxWeightOnlyConfig
+from torchao.quantization.granularity import PerTensor, PerAxis
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -44,28 +46,28 @@ def get_topk_predictions(model, tokenizer, text, k=5):
     
     return predicted_tokens, predicted_scores, mask_logits.detach().cpu(), inputs
 
-def quantize_linear_weights(layer, num_bits):
-    # manual quantization for testing
-    with torch.no_grad():
-        weights = layer.weight.data
-        # e.g. is 128 x 128 for query layer
-        # can quantized bias later too for whole projection
+# def quantize_linear_weights(layer, num_bits):
+#     # manual quantization for testing
+#     with torch.no_grad():
+#         weights = layer.weight.data
+#         # e.g. is 128 x 128 for query layer
+#         # can quantized bias later too for whole projection
     
-        qmax = 2**(num_bits-1)-1
-        max_val = weights.abs().max()
+#         qmax = 2**(num_bits-1)-1
+#         max_val = weights.abs().max()
 
-        if max_val == 0:
-            return
+#         if max_val == 0:
+#             return
     
-        scale = max_val / qmax
+#         scale = max_val / qmax
 
-        quantized = torch.round(weights/scale)
-        quantized = torch.clamp(quantized, -qmax, qmax)
+#         quantized = torch.round(weights/scale)
+#         quantized = torch.clamp(quantized, -qmax, qmax)
 
-        dequantized =  quantized*scale
-        # floating point tensor that approximates quantized weights
+#         dequantized =  quantized*scale
+#         # floating point tensor that approximates quantized weights
 
-        layer.weight.data.copy_(dequantized)
+#         layer.weight.data.copy_(dequantized)
 
 
 def capture_activation_for_one_module(model, module, inputs):
@@ -204,6 +206,29 @@ def get_module_by_name(root, module_path):
         module = getattr(module, part)
     return module
 
+# def quantize_only_one_sublayer_torchao_per_tensor(model, block_index, sub_layer):
+#     target = get_module_by_name(model.bert.encoder.layer[block_index], sub_layer)
+
+#     print("\nBefore TorchAO quantization:")
+#     print(type(target))
+#     print(target)
+
+#     quantize_(
+#         target,
+#         IntxWeightOnlyConfig(
+#             weight_dtype=torch.int8,
+#             granularity=PerTensor()
+#         )
+#     )
+
+#     new_target = get_module_by_name(model.bert.encoder.layer[block_index], sub_layer)
+
+#     print("\nAfter TorchAO per-tensor INT8 weight-only quantization:")
+#     print(type(new_target))
+#     print(new_target)
+
+#     return new_target
+
 def main():
 
     model_name = "/home/lecacca/VSCode Environment/BERT-Testing/bert_uncased_L-2_H-128_A-2"
@@ -218,7 +243,7 @@ def main():
     # setting layer/block of transformer to inspect here
     target_block_index = 0
     # sublayer to inspect
-    sub_layer = "output.dense"
+    sub_layer = "attention.self.query"
 
     baseline_sublayer = get_module_by_name(
         baseline_model.bert.encoder.layer[target_block_index],
@@ -247,6 +272,12 @@ def main():
         sub_layer = sub_layer,
         config = Int8WeightOnlyConfig()
     )
+
+    # quantize_only_one_sublayer_torchao_per_tensor(
+    #     quant_model,
+    #     block_index=target_block_index,
+    #     sub_layer=sub_layer
+    # )
 
     quant_sublayer = get_module_by_name(
         quant_model.bert.encoder.layer[target_block_index],

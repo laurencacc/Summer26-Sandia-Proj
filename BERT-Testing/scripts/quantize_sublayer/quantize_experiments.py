@@ -290,10 +290,57 @@ def compare_expected_checksum_drift(baseline_checksum, quant_checksum, baseline_
         "rel_drift_to_expected_output_l1": rel_drift_to_expected_output_l1,
     }
 
+def quantize_linear_weights_per_channel(layer, num_bits=8, verbose=True):
+    with torch.no_grad():
+        weights = layer.weight.data
+
+        if weights.ndim != 2:
+            raise ValueError(
+                f"Expected a 2D Linear weight tensor, got shape {weights.shape}"
+            )
+        
+        qmax = 2**(num_bits-1)-1
+        qmin = -(2**(num_bits-1))
+
+        max_vals = weights.abs().amax(dim=1, keepdim=True)
+
+        scales = 2.0* max_vals / float(qmax-qmin)
+
+        scales = torch.where(scales == 0, torch.ones_like(scales), scales)
+
+        zero_points = torch.zeros_like(scales)
+
+        quantized = torch.round(weights/scales)
+        quantized = torch.clamp(quantized, qmin, qmax)
+
+        dequantized = quantized * scales
+
+        layer.weight.data.copy_(dequantized)
+
+        if verbose:
+            print("\nPer-channel fake quantization applied")
+            print("Weight shape:", tuple(weights.shape))
+            print("Scale shape:", tuple(scales.shape))
+            print("Zero point shape:", tuple(zero_points.shape))
+            print("qmin/qmax:", qmin, qmax)
+            print("First 5 scales:", scales[:5, 0].detach().cpu())
+            print("Quantized int min/max:",
+                  quantized.min().item(),
+                  quantized.max().item())
+            
+        return{
+            "quantized_int": quantized.detach().clone(),
+            "dequantized_weight": dequantized.detach().clone(),
+            "scales": scales.detach().clone(),
+            "zero_points": zero_points.detach().clone(),
+            "qmin": qmin,
+            "qmax": qmax,  
+        }
+
 def main():
 
     # Create baseline and quant models to compare
-    model_name = "/home/lecacca/VSCode Environment/BERT-Testing/bert-mini"
+    model_name = "/home/lecacca/VSCode Environment/BERT-Testing/bert_uncased_L-2_H-128_A-2"
     baseline_model = AutoModelForMaskedLM.from_pretrained(model_name)
     quant_model = AutoModelForMaskedLM.from_pretrained(model_name)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -307,12 +354,12 @@ def main():
     text = "Paris is the capital of [MASK]."
 
     # Uncomment the sublayer you want to analyze
-    # sub_layer = "attention.self.query"
+    sub_layer = "attention.self.query"
     # sub_layer = "attention.self.key"
     # sub_layer = "attention.self.value"
     # sub_layer = "attention.output.dense"
     # sub_layer = "intermediate.dense"
-    sub_layer = "output.dense"
+    # sub_layer = "output.dense"
 
     # analyzes the baseline sublayer
     baseline_sublayer = get_module_by_name(
@@ -339,7 +386,6 @@ def main():
         quant_model.bert.encoder.layer[block_index],
         measurement_sub_layer
     )
-
 
     # these sublayers are grouped to "quantize" all of the linear sublayers
     quant_attention_layers = [
@@ -368,7 +414,13 @@ def main():
     # Captures output tensor produced by sublayer for checksum later
     baseline_sublayer_activation = capture_activation_for_one_module(baseline_model, baseline_sublayer, inputs)
 
-    quantize_linear_weights(quant_sublayer, num_bits=8)
+    # quantize_linear_weights(quant_sublayer, num_bits=8)
+
+    quant_info = quantize_linear_weights_per_channel(
+        quant_sublayer,
+        num_bits=8,
+        verbose=True
+    )
 
     # for layer in quant_attention_layers:
     #     quantize_linear_weights(layer, num_bits=8)

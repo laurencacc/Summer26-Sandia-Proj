@@ -2,6 +2,10 @@
 # experiment 1: quantize only block0.attention.self.query
 from transformers import AutoTokenizer, AutoModelForMaskedLM 
 import torch
+import pandas as pd
+from pathlib import Path
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 def get_topk_predictions(model, tokenizer, text, k=5):
     # tokenizes model
@@ -48,49 +52,28 @@ def get_topk_predictions(model, tokenizer, text, k=5):
     # returns top k token strings, top k raw logits, full vocab logits for masked position, and tokenized model inputs
     return predicted_tokens, predicted_scores, mask_logits.detach(), inputs
 
-def quantize_linear_weights(layer, num_bits):
-    # manual quantization for testing
-    with torch.no_grad():
-        weights = layer.weight.data
-        # e.g. is 128 x 128 for query layer
-        # can quantized bias later too for whole projection
+# def quantize_linear_weights(layer, num_bits):
+#     # manual quantization for testing
+#     with torch.no_grad():
+#         weights = layer.weight.data
+#         # e.g. is 128 x 128 for query layer
+#         # can quantized bias later too for whole projection
     
-        qmax = 2**(num_bits-1)-1
-        max_val = weights.abs().max()
+#         qmax = 2**(num_bits-1)-1
+#         max_val = weights.abs().max()
 
-        if max_val == 0:
-            return
+#         if max_val == 0:
+#             return
     
-        scale = max_val / qmax
+#         scale = max_val / qmax
 
-        quantized = torch.round(weights/scale)
-        quantized = torch.clamp(quantized, -qmax, qmax)
+#         quantized = torch.round(weights/scale)
+#         quantized = torch.clamp(quantized, -qmax, qmax)
 
-        dequantized =  quantized*scale
-        # floating point tensor that approximates quantized weights
+#         dequantized =  quantized*scale
+#         # floating point tensor that approximates quantized weights
 
-        layer.weight.data.copy_(dequantized)
-
-def capture_activation_for_one_module(model, module, inputs):
-    activations = {}
-    # small container to store captured output
-
-    def hook_fn(module, input, output):
-        activations["output"] = output.detach()
-        # tensor values only, not training graph info (?)
-
-    handle = module.register_forward_hook(hook_fn)
-
-    with torch.no_grad():
-        _ = model(**inputs)
-
-    handle.remove()
-
-    return activations["output"]
-
-
-def count_parameters(module):
-    return sum(p.numel() for p in module.parameters())
+#         layer.weight.data.copy_(dequantized)
 
 def compare_results(
     baseline_tokens,
@@ -99,8 +82,7 @@ def compare_results(
     quant_tokens,
     quant_scores,
     quant_logits,
-    baseline_activation=None,
-    quant_activation=None
+    eps=1e-12,
 ):
     print("Baseline top-5:")
     for i, (tok, score) in enumerate(zip(baseline_tokens, baseline_scores), start=1):
@@ -117,47 +99,33 @@ def compare_results(
         for b_tok, q_tok in zip(baseline_tokens, quant_tokens)
     )
 
+    logit_diff = quant_logits - baseline_logits
+    abs_logit_diff = logit_diff.abs()
+
+    max_abs_logit_diff = abs_logit_diff.max().item()
+    mean_abs_logit_diff = abs_logit_diff.mean().item()
+
+    logit_l2_drift = torch.linalg.vector_norm(logit_diff).item()
+    baseline_logit_l2 = torch.linalg.vector_norm(baseline_logits).item()
+    logit_rel_l2_drift = logit_l2_drift / (baseline_logit_l2 + eps)
+
     print(f"\nTop-1 match: {top1_match}")
     print(f"Top-5 overlap: {top5_overlap}/5")
     print(f"Top-5 rank-position matches: {top5_rank_matches}/5")
+    print(f"Max absolute logit difference: {max_abs_logit_diff:.6f}")
+    print(f"Mean absolute logit difference: {mean_abs_logit_diff:.6f}")
+    print(f"Logit L2 drift: {logit_l2_drift:.6f}")
+    print(f"Relative L2 logit drift: {logit_rel_l2_drift:.10f}")
 
-    logit_diff = (baseline_logits - quant_logits).abs()
-    print(f"Max absolute logit difference: {logit_diff.max().item():.6f}")
-    print(f"Mean absolute logit difference: {logit_diff.mean().item():.6f}")
-
-    if baseline_activation is not None and quant_activation is not None:
-        b = baseline_activation.reshape(-1)
-        q = quant_activation.reshape(-1)
-
-        cosine_sim = torch.nn.functional.cosine_similarity(
-            b.unsqueeze(0), q.unsqueeze(0)
-        ).item()
-
-        print(f"Activation cosine similarity: {cosine_sim:.6f}")
-
-# def check_code_works():
-#     model_name = "/home/lecacca/VSCode Environment/BERT-Testing/bert_uncased_L-2_H-128_A-2"
-#     baseline_model = AutoModelForMaskedLM.from_pretrained(model_name)
-#     quant_model = AutoModelForMaskedLM.from_pretrained(model_name)
-#     tokenizer = AutoTokenizer.from_pretrained(model_name)
-#     baseline_model.eval()
-#     quant_model.eval()
-
-#     text = "Paris is the capital of [MASK]."
-
-#     baseline_tokens, baseline_scores, baseline_logits, inputs = get_topk_predictions(baseline_model, tokenizer, text, k=5)
-
-#     quantize_linear_weights(quant_model.bert.encoder.layer[0].intermediate.dense, num_bits=8)
-
-#     quant_tokens, quant_scores, quant_logits, _ = get_topk_predictions(quant_model, tokenizer, text, k=5)
-
-#     print("\ncheck_code_works: success")
-#     print("Baseline top token:", baseline_tokens[0])
-#     print("Quantized top token:", quant_tokens[0])
-#     print("Baseline logits shape:", baseline_logits.shape)
-#     print("Quantized logits shape:", quant_logits.shape)
-
-#     return True
+    return {
+        "top1_match": top1_match,
+        "top5_overlap": top5_overlap,
+        "top5_rank_matches": top5_rank_matches,
+        "max_abs_logit_diff": max_abs_logit_diff,
+        "mean_abs_logit_diff": mean_abs_logit_diff,
+        "logit_l2_drift": logit_l2_drift,
+        "logit_rel_l2_drift": logit_rel_l2_drift,
+    }
 
 def verify_linear_layer_math(model, module, inputs, label="layer"):
     saved = {}
@@ -216,78 +184,160 @@ def get_module_by_name(root, module_path):
         module = getattr(module, part)
     return module
 
-# Old way to find checksum (V1)
-# def checksum_output(baseline_output, quant_output):
-#     # We should not expect output, find way to not involve
-#     y = baseline_output.reshape(-1)
-
-#     y_hat = quant_output.reshape(-1)
-
-#     # e^T(y) is just sum of all entries, use .sum()
-#     checksum_baseline = y.sum().item()
-#     checksum_quant = y_hat.sum().item()
-#     checksum_error = (y_hat-y).abs().sum().item()
-
-#     print("\nChecksum of output activations:")
-#     print(f"Baseline checksum: {checksum_baseline:.10f}")
-#     print(f"Quantized checksum: {checksum_quant:.10f}")
-#     print(f"Checksum difference: {checksum_quant - checksum_baseline:.10f}")
-#     print(f"Checksum of error: {checksum_error:.10f}\n")
-
-#     return{
-#         "baseline_checksum": checksum_baseline,
-#         "quant_checksum": checksum_quant,
-#         "checksum_difference": checksum_quant - checksum_baseline,
-#         "checksum_error": checksum_error,
-#     }
-
 def full_recompute_expected_output_checksum(input_tensor, weight, bias, label="layer"):
-    expected_output = torch.matmul(input_tensor, weight.T)
-    if bias is not None:
-        expected_output = expected_output + bias
-    
-    checksum_expected = expected_output.reshape(-1).sum().item()
-    # Change is absolute value so no values cancel
-    expected_output_l1_magnitude = expected_output.reshape(-1).abs().sum().item()
-    
-    return{
-        "expected_checksum": checksum_expected,
+    with torch.no_grad():
+        expected_output = torch.matmul(input_tensor, weight.T)
+
+        if bias is not None:
+            expected_output = expected_output + bias
+
+        flat_output = expected_output.reshape(-1, expected_output.shape[-1])
+
+        # Per-output-channel checksum, shape [out_features]
+        channel_checksum = flat_output.sum(dim=0)
+
+        # Per-output-channel L1 magnitude, shape [out_features]
+        channel_l1_magnitude = flat_output.abs().sum(dim=0)
+
+        # Total L1 magnitude, scalar tensor
+        total_l1_magnitude = flat_output.abs().sum()
+
+    return {
         "expected_output": expected_output,
-        "expected_output_l1_magnitude": expected_output_l1_magnitude,
+        "channel_checksum": channel_checksum,
+        "channel_l1_magnitude": channel_l1_magnitude,
+        "total_l1_magnitude": total_l1_magnitude,
     }
 
-def compare_expected_checksum_drift(baseline_checksum, quant_checksum, baseline_expected_output_l1_magnitude=None, label="layer", eps=1e-12):
-    signed_drift = (quant_checksum - baseline_checksum)
-    abs_drift = abs(signed_drift)
-    rel_drift_to_baseline_checksum = abs_drift / (abs(baseline_checksum)+eps)
+def actual_per_channel_checksum(output_tensor):
+    with torch.no_grad():
+        flat_output = output_tensor.reshape(-1, output_tensor.shape[-1])
+        return flat_output.sum(dim=0)
 
-    if baseline_expected_output_l1_magnitude is not None:
-        rel_drift_to_expected_output_l1 = (
-            abs_drift / (baseline_expected_output_l1_magnitude + eps)
-        )
-    else:
-        rel_drift_to_expected_output_l1 = None
+def compare_per_channel_checksum_drift(
+    baseline_channel_checksum,
+    quant_channel_checksum,
+    baseline_channel_l1_magnitude=None,
+    label="layer",
+    eps=1e-12,
+):
+    """
+    Compare two per-channel checksum vectors.
 
-    print(f"\nExpected checksum comparison for {label}")
-    print(f"Baseline expected checksum: {baseline_checksum:.10f}")
-    print(f"Quantized expected checksum: {quant_checksum:.10f}")
-    print(f"Signed expected checksum drift: {signed_drift:.10f}")
-    print(f"Absolute expected checksum drift: {abs_drift:.10f}")
-    print(f"Relative expected checksum drift to baseline: {rel_drift_to_baseline_checksum:.10f}")
+    baseline_channel_checksum shape: [out_features]
+    quant_channel_checksum shape: [out_features]
+    """
+    with torch.no_grad():
+        delta = quant_channel_checksum - baseline_channel_checksum
+        abs_delta = delta.abs()
 
-    if rel_drift_to_expected_output_l1 is not None:
-        print(
-            "Relative drift to expected output L1 magnitude: "
-            f"{rel_drift_to_expected_output_l1:.10f}"
-        )
+        mean_abs_drift = abs_delta.mean().item()
+        max_abs_drift = abs_delta.max().item()
+        l2_drift = torch.linalg.vector_norm(delta).item()
+        signed_sum_drift = delta.sum().item()
 
-    return{
-        "baseline_expected_checksum": baseline_checksum,
-        "quant_expected_checksum": quant_checksum,
-        "signed_expected_checksum_drift": signed_drift,
-        "abs_expected_checksum_drift": abs_drift,
-        "rel_drift_to_baseline_checksum": rel_drift_to_baseline_checksum,
-        "rel_drift_to_expected_output_l1": rel_drift_to_expected_output_l1,
+        baseline_l2 = torch.linalg.vector_norm(baseline_channel_checksum).item()
+        rel_l2_drift = l2_drift / (baseline_l2 + eps)
+
+        if baseline_channel_l1_magnitude is not None:
+            rel_to_output_l1 = abs_delta.sum().item() / (
+                baseline_channel_l1_magnitude.sum().item() + eps
+            )
+        else:
+            rel_to_output_l1 = None
+
+    print(f"\nPer-channel checksum comparison for {label}")
+    print("Checksum vector shape:", tuple(baseline_channel_checksum.shape))
+    print(f"Mean absolute channel-checksum drift: {mean_abs_drift:.10f}")
+    print(f"Max absolute channel-checksum drift:  {max_abs_drift:.10f}")
+    print(f"L2 channel-checksum drift:            {l2_drift:.10f}")
+    print(f"Relative L2 drift:                    {rel_l2_drift:.10f}")
+    print(f"Signed sum of channel drifts:         {signed_sum_drift:.10f}")
+
+    if rel_to_output_l1 is not None:
+        print(f"Relative drift to output L1 magnitude:{rel_to_output_l1:.10f}")
+
+    return {
+        "delta": delta.detach().clone(),
+        "abs_delta": abs_delta.detach().clone(),
+        "mean_abs_drift": mean_abs_drift,
+        "max_abs_drift": max_abs_drift,
+        "l2_drift": l2_drift,
+        "rel_l2_drift": rel_l2_drift,
+        "signed_sum_drift": signed_sum_drift,
+        "rel_to_output_l1": rel_to_output_l1,
+    }
+
+def compare_activation_drift(
+    baseline_output,
+    quant_output,
+    label="layer",
+    eps=1e-12,
+):
+    """
+    Compare two full activation tensors.
+    """
+    with torch.no_grad():
+        diff = quant_output - baseline_output
+        abs_diff = diff.abs()
+
+        mean_abs = abs_diff.mean().item()
+        max_abs = abs_diff.max().item()
+        l2 = torch.linalg.vector_norm(diff.reshape(-1)).item()
+
+        b = baseline_output.reshape(-1)
+        q = quant_output.reshape(-1)
+
+        cosine = torch.nn.functional.cosine_similarity(
+            b.unsqueeze(0),
+            q.unsqueeze(0),
+            dim=1
+        ).item()
+
+        rel_l2 = l2 / (torch.linalg.vector_norm(b).item() + eps)
+
+    print(f"\nActivation drift for {label}")
+    print(f"Mean absolute activation drift: {mean_abs:.10f}")
+    print(f"Max absolute activation drift:  {max_abs:.10f}")
+    print(f"L2 activation drift:            {l2:.10f}")
+    print(f"Relative L2 activation drift:   {rel_l2:.10f}")
+    print(f"Activation cosine similarity:   {cosine:.10f}")
+
+    return {
+        "mean_abs": mean_abs,
+        "max_abs": max_abs,
+        "l2": l2,
+        "rel_l2": rel_l2,
+        "cosine": cosine,
+    }
+
+def validate_per_channel_checksum_math(check, label="layer"):
+    """
+    Validates:
+        sum(actual module output) == sum(manually recomputed output)
+    """
+    expected = full_recompute_expected_output_checksum(
+        check["input"],
+        check["weight"],
+        check["bias"],
+        label=label,
+    )
+
+    expected_channel_checksum = expected["channel_checksum"]
+    actual_channel_checksum = actual_per_channel_checksum(check["actual_output"])
+
+    diff = (expected_channel_checksum - actual_channel_checksum).abs()
+
+    print(f"\nValidating per-channel checksum for {label}")
+    print("Checksum shape:", tuple(expected_channel_checksum.shape))
+    print(f"Expected-vs-actual checksum max diff:  {diff.max().item():.10f}")
+    print(f"Expected-vs-actual checksum mean diff: {diff.mean().item():.10f}")
+
+    return {
+        "expected_channel_checksum": expected_channel_checksum,
+        "actual_channel_checksum": actual_channel_checksum,
+        "max_diff": diff.max().item(),
+        "mean_diff": diff.mean().item(),
     }
 
 def quantize_linear_weights_per_channel(layer, num_bits=8, verbose=True):
@@ -337,6 +387,159 @@ def quantize_linear_weights_per_channel(layer, num_bits=8, verbose=True):
             "qmax": qmax,  
         }
 
+def compare_drift_metrics(
+    checksum_comparison,
+    local_activation_comparison,
+    prediction_comparison=None,
+    label="experiment",
+):
+    print(f"\n=== Drift metric comparison: {label} ===")
+
+    print("\nChecksum drift metrics:")
+    print(
+        "  checksum mean abs drift:",
+        f"{checksum_comparison['mean_abs_drift']:.10f}"
+    )
+    print(
+        "  checksum max abs drift:",
+        f"{checksum_comparison['max_abs_drift']:.10f}"
+    )
+    print(
+        "  checksum L2 drift:",
+        f"{checksum_comparison['l2_drift']:.10f}"
+    )
+    print(
+        "  checksum relative L2 drift:",
+        f"{checksum_comparison['rel_l2_drift']:.10f}"
+    )
+
+    print("\nLocal activation drift metrics:")
+    print(
+        "  activation mean abs drift:",
+        f"{local_activation_comparison['mean_abs']:.10f}"
+    )
+    print(
+        "  activation max abs drift:",
+        f"{local_activation_comparison['max_abs']:.10f}"
+    )
+    print(
+        "  activation L2 drift:",
+        f"{local_activation_comparison['l2']:.10f}"
+    )
+    print(
+        "  activation relative L2 drift:",
+        f"{local_activation_comparison['rel_l2']:.10f}"
+    )
+    print(
+        "  activation cosine similarity:",
+        f"{local_activation_comparison['cosine']:.10f}"
+    )
+
+    if prediction_comparison is not None:
+        print("\nFinal logit drift metrics:")
+        print(
+            "  mean abs logit diff:",
+            f"{prediction_comparison['mean_abs_logit_diff']:.10f}"
+        )
+        print(
+            "  max abs logit diff:",
+            f"{prediction_comparison['max_abs_logit_diff']:.10f}"
+        )
+        print(
+            "  top1 match:",
+            prediction_comparison["top1_match"]
+        )
+        print(
+            "  logit L2 drift:",
+            f"{prediction_comparison['logit_l2_drift']:.10f}"
+        )
+        print(
+            "  logit relative L2 drift:",
+            f"{prediction_comparison['logit_rel_l2_drift']:.10f}"
+        )
+
+def plot_relative_drift_bars(df, save_path=None):
+    plot_df = df[
+        [
+            "sub_layer",
+            "checksum_rel_l2_drift",
+            "activation_rel_l2_drift",
+        ]
+    ].melt(
+        id_vars="sub_layer",
+        var_name="metric",
+        value_name="value",
+    )
+
+    metric_labels = {
+        "checksum_rel_l2_drift": "Checksum relative L2 drift",
+        "activation_rel_l2_drift": "Activation relative L2 drift",
+    }
+
+    plot_df["metric"] = plot_df["metric"].map(metric_labels)
+
+    plt.figure(figsize=(9, 5))
+
+    sns.barplot(
+        data=plot_df,
+        x="sub_layer",
+        y="value",
+        hue="metric",
+    )
+
+    plt.xlabel("Quantized sublayer")
+    plt.ylabel("Relative L2 drift")
+    plt.title("Per-output-channel checksum drift vs local activation drift")
+    plt.xticks(rotation=25, ha="right")
+    plt.grid(axis="y", alpha=0.3)
+    plt.tight_layout()
+
+    if save_path is not None:
+        plt.savefig(save_path, bbox_inches="tight")
+
+    plt.show()
+
+def plot_checksum_vs_logit_drift(df, save_path=None):
+    plot_df = df[
+        [
+            "sub_layer",
+            "checksum_rel_l2_drift",
+            "logit_rel_l2_drift",
+        ]
+    ].melt(
+        id_vars="sub_layer",
+        var_name="metric",
+        value_name="value",
+    )
+
+    metric_labels = {
+        "checksum_rel_l2_drift": "Checksum relative L2 drift",
+        "logit_rel_l2_drift": "Final logit relative L2 drift",
+    }
+
+    plot_df["metric"] = plot_df["metric"].map(metric_labels)
+
+    plt.figure(figsize=(9, 5))
+
+    sns.barplot(
+        data=plot_df,
+        x="sub_layer",
+        y="value",
+        hue="metric",
+    )
+
+    plt.xlabel("Quantized sublayer")
+    plt.ylabel("Relative L2 drift")
+    plt.title("Per-output-channel checksum drift vs final logit drift")
+    plt.xticks(rotation=25, ha="right")
+    plt.grid(axis="y", alpha=0.3)
+    plt.tight_layout()
+
+    if save_path is not None:
+        plt.savefig(save_path, bbox_inches="tight")
+
+    plt.show()
+
 def main():
 
     # Create baseline and quant models to compare
@@ -373,32 +576,18 @@ def main():
         sub_layer
     )
 
-    measurement_sub_layer = "output.dense"
+    # # these sublayers are grouped to "quantize" all of the linear sublayers
+    # quant_attention_layers = [
+    #     quant_model.bert.encoder.layer[block_index].attention.self.query,
+    #     quant_model.bert.encoder.layer[block_index].attention.self.key,
+    #     quant_model.bert.encoder.layer[block_index].attention.self.value,
+    #     quant_model.bert.encoder.layer[block_index].attention.output.dense,
+    # ]
 
-    # analyzes the baseline sublayer
-    baseline_measurement_sublayer = get_module_by_name(
-        baseline_model.bert.encoder.layer[block_index],
-        measurement_sub_layer
-    )
-
-    # analyzes the quantization sublayer to "quantize"
-    quant_measurement_sublayer = get_module_by_name(
-        quant_model.bert.encoder.layer[block_index],
-        measurement_sub_layer
-    )
-
-    # these sublayers are grouped to "quantize" all of the linear sublayers
-    quant_attention_layers = [
-        quant_model.bert.encoder.layer[block_index].attention.self.query,
-        quant_model.bert.encoder.layer[block_index].attention.self.key,
-        quant_model.bert.encoder.layer[block_index].attention.self.value,
-        quant_model.bert.encoder.layer[block_index].attention.output.dense,
-    ]
-
-    quant_ffn_layers = [
-        quant_model.bert.encoder.layer[block_index].intermediate.dense,
-        quant_model.bert.encoder.layer[block_index].output.dense,
-    ]
+    # quant_ffn_layers = [
+    #     quant_model.bert.encoder.layer[block_index].intermediate.dense,
+    #     quant_model.bert.encoder.layer[block_index].output.dense,
+    # ]
 
     # Get top-k (5) predictions for baseline
     baseline_tokens, baseline_scores, baseline_logits, inputs = get_topk_predictions(baseline_model, tokenizer, text, k=5)
@@ -411,9 +600,7 @@ def main():
     print(f'weight: {baseline_check["weight"][:2, :5]}')
     print(f'actual output: {baseline_check["actual_output"][0,0,:5]}')
 
-    # Captures output tensor produced by sublayer for checksum later
-    baseline_sublayer_activation = capture_activation_for_one_module(baseline_model, baseline_sublayer, inputs)
-
+      
     # quantize_linear_weights(quant_sublayer, num_bits=8)
 
     quant_info = quantize_linear_weights_per_channel(
@@ -429,8 +616,6 @@ def main():
 
     quant_tokens, quant_scores, quant_logits, _ = get_topk_predictions(quant_model, tokenizer, text, k=5)
 
-    quant_sublayer_activation = capture_activation_for_one_module(quant_model, quant_sublayer, inputs)
-
     # # This measures how much of the selected sublayer's activation changed under quantization (drift measurement)
     # sublayer_checksum = all_ones_checksum_drift(
     # baseline_sublayer_activation,
@@ -445,75 +630,188 @@ def main():
     #     label="[MASK] logits"
     # )
 
-    X = baseline_check["input"]
-
-    # checksum_results = checksum_output(baseline_sublayer_activation, quant_sublayer_activation)
-    baseline_expected_checksum = full_recompute_expected_output_checksum(
-        X,
-        baseline_check["weight"],
-        baseline_check["bias"],
+    baseline_checksum_validation = validate_per_channel_checksum_math(
+        baseline_check,
         label=f"baseline {sub_layer}"
     )
 
-    quant_expected_checksum = full_recompute_expected_output_checksum(
-        X,
-        quant_check["weight"],
-        quant_check["bias"],
+    quant_checksum_validation = validate_per_channel_checksum_math(
+        quant_check,
         label=f"fake-quantized {sub_layer}"
     )
 
-    checksum_comparison = compare_expected_checksum_drift(
-        baseline_expected_checksum["expected_checksum"],
-        quant_expected_checksum["expected_checksum"],
-        baseline_expected_output_l1_magnitude=baseline_expected_checksum[
-            "expected_output_l1_magnitude"
+    x_q = quant_check["input"]
+
+    baseline_expected_on_quant_input = full_recompute_expected_output_checksum(
+        x_q,
+        baseline_check["weight"],
+        baseline_check["bias"],
+        label=f"FP32 expected on quantized-path input for {sub_layer}"
+    )
+
+    quant_actual_channel_checksum = actual_per_channel_checksum(
+        quant_check["actual_output"]
+    )
+
+    checksum_comparison = compare_per_channel_checksum_drift(
+        baseline_expected_on_quant_input["channel_checksum"],
+        quant_actual_channel_checksum,
+        baseline_channel_l1_magnitude=baseline_expected_on_quant_input[
+            "channel_l1_magnitude"
         ],
-        label=sub_layer
+        label=f"{sub_layer}: quantized actual vs FP32 expected on same input"
     )
 
-    baseline_measurement_check = verify_linear_layer_math(
-        baseline_model,
-        baseline_measurement_sublayer,
-        inputs,
-        label=f"baseline measurement {measurement_sub_layer}"
-    )
-
-    quant_measurement_check = verify_linear_layer_math(
-        quant_model,
-        quant_measurement_sublayer,
-        inputs,
-        label=f"quant measurement {measurement_sub_layer}"
-    )
-
-    baseline_measurement_expected = full_recompute_expected_output_checksum(
-        baseline_measurement_check["input"],
-        baseline_measurement_check["weight"],
-        baseline_measurement_check["bias"],
-        label=f"baseline measurement {measurement_sub_layer}"
-    )
-
-    quant_measurement_expected = full_recompute_expected_output_checksum(
-        quant_measurement_check["input"],
-        quant_measurement_check["weight"],
-        quant_measurement_check["bias"],
-        label=f"quant measurement {measurement_sub_layer}"
-    )
-
-    measurement_checksum_comparison = compare_expected_checksum_drift(
-        baseline_measurement_expected["expected_checksum"],
-        quant_measurement_expected["expected_checksum"],
-        baseline_expected_output_l1_magnitude=baseline_measurement_expected[
-            "expected_output_l1_magnitude"
-        ],
-        label=f"measurement at {measurement_sub_layer} after quantizing {sub_layer}"
+    local_activation_comparison = compare_activation_drift(
+        baseline_expected_on_quant_input["expected_output"],
+        quant_check["actual_output"],
+        label=f"{sub_layer}: local activation drift",
     )
 
     print(f"\n")
 
-    compare_results(baseline_tokens, baseline_scores, baseline_logits, quant_tokens, quant_scores, quant_logits, baseline_sublayer_activation, quant_sublayer_activation)
+    # compare_results(baseline_tokens, baseline_scores, baseline_logits, quant_tokens, quant_scores, quant_logits)
+
+    prediction_comparison = compare_results(
+        baseline_tokens,
+        baseline_scores,
+        baseline_logits,
+        quant_tokens,
+        quant_scores,
+        quant_logits
+    )
+
+    compare_drift_metrics(
+        checksum_comparison,
+        local_activation_comparison,
+        prediction_comparison,
+        label=sub_layer,
+    )
+
+    df = pd.DataFrame([
+        {
+            "sub_layer": "attention.self.query",
+            "checksum_mean_abs_drift": 0.0257652011,
+            "checksum_max_abs_drift": 0.1201741695,
+            "checksum_l2_drift": 0.3886816204,
+            "checksum_rel_l2_drift": 0.0065672165,
+            "activation_mean_abs_drift": 0.0052077291,
+            "activation_max_abs_drift": 0.0278557539,
+            "activation_l2_drift": 0.2278427333,
+            "activation_rel_l2_drift": 0.0070689237,
+            "activation_cosine": 0.9999752045,
+            "logit_l2_drift": 0.7233316302,
+            "logit_rel_l2_drift": 0.0007997240,
+            "mean_abs_logit_diff": 0.0033421994,
+            "max_abs_logit_diff": 0.0180463791,
+            "top1_match": True,
+        },
+        {
+            "sub_layer": "attention.self.key",
+            "checksum_mean_abs_drift": 0.0260646008,
+            "checksum_max_abs_drift": 0.0941491127,
+            "checksum_l2_drift": 0.3736667335,
+            "checksum_rel_l2_drift": 0.0055202044,
+            "activation_mean_abs_drift": 0.0050615445,
+            "activation_max_abs_drift": 0.0253560841,
+            "activation_l2_drift": 0.2215766311,
+            "activation_rel_l2_drift": 0.0063535984,
+            "activation_cosine": 0.9999799132,
+            "logit_l2_drift": 1.1430298090,
+            "logit_rel_l2_drift": 0.0012637472,
+            "mean_abs_logit_diff": 0.0052721873,
+            "max_abs_logit_diff": 0.0280556679,
+            "top1_match": True,
+        },
+        {
+            "sub_layer": "attention.self.value",
+            "checksum_mean_abs_drift": 0.0349627659,
+            "checksum_max_abs_drift": 0.1254720688,
+            "checksum_l2_drift": 0.4989137352,
+            "checksum_rel_l2_drift": 0.0070032504,
+            "activation_mean_abs_drift": 0.0076473188,
+            "activation_max_abs_drift": 0.0391297340,
+            "activation_l2_drift": 0.3386950195,
+            "activation_rel_l2_drift": 0.0072152528,
+            "activation_cosine": 0.9999738336,
+            "logit_l2_drift": 2.7321274281,
+            "logit_rel_l2_drift": 0.0030206722,
+            "mean_abs_logit_diff": 0.0124900090,
+            "max_abs_logit_diff": 0.0663692951,
+            "top1_match": True,
+        },
+        {
+            "sub_layer": "attention.output.dense",
+            "checksum_mean_abs_drift": 0.0405370519,
+            "checksum_max_abs_drift": 0.2663183212,
+            "checksum_l2_drift": 0.6262614131,
+            "checksum_rel_l2_drift": 0.0085935720,
+            "activation_mean_abs_drift": 0.0050411066,
+            "activation_max_abs_drift": 0.0366415977,
+            "activation_l2_drift": 0.2296189070,
+            "activation_rel_l2_drift": 0.0081941384,
+            "activation_cosine": 0.9999663830,
+            "logit_l2_drift": 2.2479872704,
+            "logit_rel_l2_drift": 0.0024854012,
+            "mean_abs_logit_diff": 0.0101248967,
+            "max_abs_logit_diff": 0.0540952086,
+            "top1_match": True,
+        },
+        {
+            "sub_layer": "intermediate.dense",
+            "checksum_mean_abs_drift": 0.0436617136,
+            "checksum_max_abs_drift": 0.3331341743,
+            "checksum_l2_drift": 1.3275030851,
+            "checksum_rel_l2_drift": 0.0048778400,
+            "activation_mean_abs_drift": 0.0062031224,
+            "activation_max_abs_drift": 0.0483562946,
+            "activation_l2_drift": 0.5689827204,
+            "activation_rel_l2_drift": 0.0050540883,
+            "activation_cosine": 0.9999872446,
+            "logit_l2_drift": 6.1283493042,
+            "logit_rel_l2_drift": 0.0067755751,
+            "mean_abs_logit_diff": 0.0265680775,
+            "max_abs_logit_diff": 0.1707801819,
+            "top1_match": True,
+        },
+        {
+            "sub_layer": "output.dense",
+            "checksum_mean_abs_drift": 0.0511743352,
+            "checksum_max_abs_drift": 0.5453767776,
+            "checksum_l2_drift": 0.9029140472,
+            "checksum_rel_l2_drift": 0.0340383971,
+            "activation_mean_abs_drift": 0.0071203616,
+            "activation_max_abs_drift": 0.1106002331,
+            "activation_l2_drift": 0.3777188957,
+            "activation_rel_l2_drift": 0.0226914660,
+            "activation_cosine": 0.9997426271,
+            "logit_l2_drift": 5.4249258041,
+            "logit_rel_l2_drift": 0.0059978618,
+            "mean_abs_logit_diff": 0.0248298384,
+            "max_abs_logit_diff": 0.1484560966,
+            "top1_match": True,
+        },
+    ])
+
+    return df
 
     # parameters_num = count_parameters(baseline_model.bert.encoder.layer[1])
     # print(f"\nParameter count: {parameters_num}")
 
 if __name__ == "__main__":
-    main()
+    df = main()
+
+    results_dir = Path("results")
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    plot_relative_drift_bars(
+        df,
+        save_path=results_dir / "relative_checksum_vs_activation_drift.pdf"
+    )
+    print(f"Saved {results_dir / 'relative_checksum_vs_activation_drift.pdf'}")
+
+    plot_checksum_vs_logit_drift(
+        df,
+        save_path=results_dir / "relative_checksum_vs_logit_drift.pdf"
+    )
+    print(f"Saved {results_dir / 'relative_checksum_vs_logit_drift.pdf'}")

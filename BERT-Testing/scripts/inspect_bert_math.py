@@ -149,6 +149,111 @@ def build_actual_module_math_rows(module_dict, runtime, execution_order):
 
     return rows
 
+def ensure_dropout_disabled(model, fail_if_enabled=True, verbose=True):
+    """
+    Verify that all nn.Dropout modules are in eval mode (training=False).
+
+    Returns:
+        list of dicts, one per dropout module:
+            {
+                "name": module name,
+                "p": dropout probability,
+                "training": bool
+            }
+
+    If fail_if_enabled is True, raises RuntimeError when any dropout layer
+    is still active.
+    """
+    dropout_status = []
+
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Dropout):
+            dropout_status.append({
+                "name": name,
+                "p": module.p,
+                "training": module.training,
+            })
+
+    enabled = [d for d in dropout_status if d["training"]]
+
+    if verbose:
+        print()
+        print("DROPOUT STATUS")
+        print("==============")
+        if not dropout_status:
+            print("No nn.Dropout modules found.")
+        else:
+            for d in dropout_status:
+                state = "ENABLED" if d["training"] else "DISABLED"
+                print(f"{d['name']}: p={d['p']}, training={d['training']} ({state})")
+
+    if enabled and fail_if_enabled:
+        names = ", ".join(d["name"] for d in enabled)
+        raise RuntimeError(
+            f"Dropout is still active for these modules: {names}. "
+            f"Call model.eval() before inference/shape tracing."
+        )
+
+    return dropout_status
+
+def verify_dropout_behavior(model, device=None, atol=0.0, rtol=0.0, verbose=True):
+    """
+    Verify that every nn.Dropout module behaves like the identity map.
+
+    This is stronger than checking module.training == False because it tests
+    actual forward behavior on a sample tensor.
+
+    Returns:
+        list of dicts with results for each dropout module.
+
+    Raises:
+        RuntimeError if any dropout layer does not behave like identity.
+    """
+    results = []
+
+    if device is None:
+        try:
+            device = next(model.parameters()).device
+        except StopIteration:
+            device = torch.device("cpu")
+
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Dropout):
+            x = torch.randn(4, 8, 16, device=device)
+            with torch.no_grad():
+                y = module(x)
+
+            same = torch.allclose(x, y, atol=atol, rtol=rtol)
+
+            info = {
+                "name": name,
+                "p": module.p,
+                "training": module.training,
+                "identity_behavior": bool(same),
+            }
+            results.append(info)
+
+    if verbose:
+        print()
+        print("DROPOUT BEHAVIOR CHECK")
+        print("======================")
+        if not results:
+            print("No nn.Dropout modules found.")
+        else:
+            for r in results:
+                state = "IDENTITY" if r["identity_behavior"] else "NOT IDENTITY"
+                print(
+                    f"{r['name']}: p={r['p']}, training={r['training']}, behavior={state}"
+                )
+
+    failures = [r for r in results if not r["identity_behavior"]]
+    if failures:
+        names = ", ".join(r["name"] for r in failures)
+        raise RuntimeError(
+            f"These dropout modules did not behave like identity during verification: {names}"
+        )
+
+    return results
 
 def write_module_math_csv(rows, csv_path):
     csv_path = Path(csv_path)
@@ -941,6 +1046,9 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
 
     model.eval()
+
+    # ensure_dropout_disabled(model, fail_if_enabled=True, verbose=True)
+    verify_dropout_behavior(model, verbose=True)
 
     text = args.text
     if text == "":

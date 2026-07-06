@@ -7,11 +7,11 @@ scripts/quantization_results.tsv
 extra/
 visualization/scatter_plot/results
 visualization/scatter_plot_torchao/results
-visualization/scatter_plot_bitsandbytes/results
+visualization/scatter_plot_gptq/results
 visualization/scatter_plot/scatter_plot.sbatch
 visualization/scatter_plot_torchao/scatter_plot_torchao.sbatch
-visualization/scatter_plot_bitsandbytes/scatter_plot_bitsandbytes.sbatch
-visualization/compare_torchao_and_bitsandbytes/results
+visualization/scatter_plot_gptq/scatter_plot_gptq.sbatch
+visualization/compare_torchao_and_gptq/results
 scripts/quantize_sublayer/results
 scripts/bert_actual_module_math.csv
 scripts/quantize_sublayer/quantize_checksum.py

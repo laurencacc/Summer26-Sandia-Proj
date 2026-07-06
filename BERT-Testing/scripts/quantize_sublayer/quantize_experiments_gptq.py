@@ -202,7 +202,10 @@ def verify_linear_layer_math(model, module, inputs, label="layer"):
 def get_module_by_name(root, module_path):
     module = root
     for part in module_path.split("."):
-        module = getattr(module, part)
+        if part.isdigit():
+            module = module[int(part)]
+        else:
+            module = getattr(module, part)
     return module
 
 # def checksum_output(baseline_output, quant_output):

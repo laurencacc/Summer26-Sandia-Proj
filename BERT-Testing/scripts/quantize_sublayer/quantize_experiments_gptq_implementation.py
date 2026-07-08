@@ -299,72 +299,120 @@ def collect_layer_inputs_for_calibration(model, tokenizer, texts, block_index, s
 
     return torch.cat(flat_inputs, dim=0)
 
+def gptq_reference_quantize(x, scale, zero, maxq):
+    """
+    Match quant.py:
 
-def _get_qrange(num_bits, sym=False):
-    if sym:
-        qmax = (2 ** (num_bits - 1)) - 1
-        qmin = -qmax
-    else:
-        qmin = 0
-        qmax = (2 ** num_bits) - 1
-    return qmin, qmax
+        q = clamp(round(x / scale) + zero, 0, maxq)
+        dq = scale * (q - zero)
 
-
-def _compute_affine_qparams_1d(tensor, num_bits=8, sym=False, eps=1e-8):
-    qmin, qmax = _get_qrange(num_bits=num_bits, sym=sym)
-
-    if sym:
-        max_abs = tensor.abs().max()
-        scale = max_abs / max(float(qmax), 1.0)
-        scale = torch.clamp(scale, min=eps)
-        zero_point = torch.tensor(0.0, device=tensor.device, dtype=tensor.dtype)
-    else:
-        t_min = tensor.min()
-        t_max = tensor.max()
-
-        if torch.isclose(t_min, t_max):
-            scale = torch.tensor(1.0, device=tensor.device, dtype=tensor.dtype)
-            zero_point = torch.tensor(0.0, device=tensor.device, dtype=tensor.dtype)
-            return scale, zero_point, qmin, qmax
-
-        scale = (t_max - t_min) / float(qmax - qmin)
-        scale = torch.clamp(scale, min=eps)
-        zero_point = torch.round(
-            torch.tensor(qmin, device=tensor.device, dtype=tensor.dtype) - t_min / scale
-        )
-        zero_point = torch.clamp(zero_point, qmin, qmax)
-
-    return scale, zero_point, qmin, qmax
-
-
-def _quantize_scalar_affine(value, scale, zero_point, qmin, qmax):
-    q = torch.round(value / scale + zero_point)
-    q = torch.clamp(q, qmin, qmax)
-    dq = (q - zero_point) * scale
+    Returns both integer-like q and dequantized dq.
+    """
+    q = torch.clamp(torch.round(x / scale) + zero, 0, maxq)
+    dq = scale * (q - zero)
     return q, dq
 
+
+def gptq_find_weight_params(
+    x,
+    num_bits=8,
+    sym=True,
+    perchannel=True,
+    eps=1e-8,
+):
+    """
+    Match Quantizer.find_params(..., weight=True) from GPTQ quant.py.
+
+    x shape:
+        [out_features, group_columns]
+
+    Returns:
+        scale shape [out_features, 1]
+        zero shape  [out_features, 1]
+        maxq scalar tensor
+    """
+    dev = x.device
+    dtype = x.dtype
+
+    maxq = torch.tensor(2 ** num_bits - 1, device=dev, dtype=dtype)
+
+    original_shape = x.shape
+
+    if perchannel:
+        x_work = x.flatten(1)
+    else:
+        x_work = x.flatten().unsqueeze(0)
+
+    tmp = torch.zeros(x_work.shape[0], device=dev, dtype=dtype)
+
+    xmin = torch.minimum(x_work.min(dim=1)[0], tmp)
+    xmax = torch.maximum(x_work.max(dim=1)[0], tmp)
+
+    if sym:
+        xmax = torch.maximum(torch.abs(xmin), xmax)
+        neg = xmin < 0
+        if torch.any(neg):
+            xmin[neg] = -xmax[neg]
+
+    all_zero = (xmin == 0) & (xmax == 0)
+    xmin[all_zero] = -1
+    xmax[all_zero] = 1
+
+    scale = (xmax - xmin) / maxq
+    scale = torch.clamp(scale, min=eps)
+
+    if sym:
+        zero = torch.full_like(scale, (maxq + 1) / 2)
+    else:
+        zero = torch.round(-xmin / scale)
+
+    if not perchannel:
+        scale = scale.repeat(original_shape[0])
+        zero = zero.repeat(original_shape[0])
+
+    scale = scale.reshape([-1] + [1] * (len(original_shape) - 1))
+    zero = zero.reshape([-1] + [1] * (len(original_shape) - 1))
+
+    return scale, zero, maxq
 
 def manual_gptq_quantize_linear_layer(
     layer,
     calibration_inputs,
     num_bits=8,
-    group_size=None,
-    sym=False,
+    group_size=128,
+    sym=True,
     damping_percent=0.01,
+    blocksize=128,
+    actorder=False,
+    perchannel=True,
     verbose=True,
 ):
     """
-    Manual GPTQ-like quantization for a single nn.Linear layer.
+    Reference-like manual GPTQ quantization for one nn.Linear layer.
 
-    layer.weight shape: [out_features, in_features]
-    calibration_inputs shape: [num_points, in_features]
+    This version more closely follows IST-DASLab GPTQ:
+
+        - Builds H from calibration inputs
+        - Adds damping
+        - Uses Cholesky-form inverse Hessian information
+        - Processes columns in blocks
+        - Quantizes one column at a time inside each block
+        - Applies GPTQ error compensation
+        - Optionally recomputes quantization parameters every group_size columns
+
+    layer.weight shape:
+        [out_features, in_features]
+
+    calibration_inputs shape:
+        [num_points, in_features]
     """
     with torch.no_grad():
-        W_orig = layer.weight.data.detach().clone().float()
+        W_orig = layer.weight.data.detach().clone()
         device = W_orig.device
-        dtype = W_orig.dtype
+        orig_dtype = W_orig.dtype
 
-        out_features, in_features = W_orig.shape
+        W = W_orig.float()
+        out_features, in_features = W.shape
 
         if calibration_inputs.ndim != 2 or calibration_inputs.shape[1] != in_features:
             raise ValueError(
@@ -372,110 +420,198 @@ def manual_gptq_quantize_linear_layer(
                 f"got {tuple(calibration_inputs.shape)}"
             )
 
-        X = calibration_inputs.detach().to(device=device, dtype=torch.float32).T
-        # X shape: [in_features, m]
+        X = calibration_inputs.detach().to(device=device, dtype=torch.float32)
 
-        H = (X @ X.T) / X.shape[1]
-        diag_mean = torch.mean(torch.diag(H))
-        damp = damping_percent * diag_mean
-        H = H + damp * torch.eye(in_features, device=device, dtype=H.dtype)
+        # ------------------------------------------------------------
+        # 1. Build Hessian approximation from calibration activations.
+        #
+        # Reference GPTQ effectively uses H proportional to X X^T.
+        # Here X.T shape is [in_features, num_points].
+        # ------------------------------------------------------------
+        X_t = X.T
+        H = 2.0 * (X_t @ X_t.T) / max(X_t.shape[1], 1)
 
-        L = torch.linalg.cholesky(H)
-        I = torch.eye(in_features, device=device, dtype=H.dtype)
-        Hinv = torch.cholesky_solve(I, L)
+        # Match reference handling of dead columns.
+        dead = torch.diag(H) == 0
+        if torch.any(dead):
+            H[dead, dead] = 1
+            W[:, dead] = 0
 
-        W_work = W_orig.clone()
-        Q = W_orig.clone()
-        Q_int = torch.zeros_like(W_orig)
+        # Optional activation-ordering, corresponding to actorder/desc_act.
+        if actorder:
+            perm = torch.argsort(torch.diag(H), descending=True)
+            W = W[:, perm]
+            H = H[perm][:, perm]
+            invperm = torch.argsort(perm)
+        else:
+            perm = None
+            invperm = None
 
+        # ------------------------------------------------------------
+        # 2. Damping + Cholesky-form inverse Hessian.
+        #
+        # Reference:
+        #   H = cholesky(H)
+        #   H = cholesky_inverse(H)
+        #   H = cholesky(H, upper=True)
+        #   Hinv = H
+        # ------------------------------------------------------------
+        damp = damping_percent * torch.mean(torch.diag(H))
+        diag = torch.arange(in_features, device=device)
+        H[diag, diag] += damp
+
+        try:
+            chol = torch.linalg.cholesky(H)
+        except RuntimeError:
+            # Extra stability for very small calibration sets.
+            jitter = 1e-4 * torch.mean(torch.diag(H))
+            H[diag, diag] += jitter
+            chol = torch.linalg.cholesky(H)
+
+        H_inv_full = torch.cholesky_inverse(chol)
+        Hinv = torch.linalg.cholesky(H_inv_full, upper=True)
+
+        Q = torch.zeros_like(W)
+        Q_int = torch.zeros_like(W)
+        Losses = torch.zeros_like(W)
+
+        # group_size=-1 in GPTQ means no grouping.
         if group_size is None or group_size <= 0:
-            group_size = in_features
+            group_size = -1
 
-        scales_per_group = []
-        zeros_per_group = []
+        # If no grouping, compute quantization params once for the full W.
+        if group_size == -1:
+            scale, zero, maxq = gptq_find_weight_params(
+                W,
+                num_bits=num_bits,
+                sym=sym,
+                perchannel=perchannel,
+            )
+        else:
+            scale = None
+            zero = None
+            maxq = None
 
-        num_groups = (in_features + group_size - 1) // group_size
+        saved_scales = []
+        saved_zeros = []
+        saved_group_starts = []
 
-        for g in range(num_groups):
-            gstart = g * group_size
-            gend = min((g + 1) * group_size, in_features)
+        # ------------------------------------------------------------
+        # 3. GPTQ block-wise, column-sequential quantization.
+        # ------------------------------------------------------------
+        for i1 in range(0, in_features, blocksize):
+            i2 = min(i1 + blocksize, in_features)
+            count = i2 - i1
 
-            group_scales = torch.empty(out_features, device=device, dtype=dtype)
-            group_zeros = torch.empty(out_features, device=device, dtype=dtype)
+            W1 = W[:, i1:i2].clone()
+            Q1 = torch.zeros_like(W1)
+            Qint1 = torch.zeros_like(W1)
+            Err1 = torch.zeros_like(W1)
+            Losses1 = torch.zeros_like(W1)
 
-            # GPTQ paper notes group params can be derived during quantization
-            # from current updated weights.
-            for r in range(out_features):
-                chunk = W_work[r, gstart:gend]
-                scale, zero_point, qmin, qmax = _compute_affine_qparams_1d(
-                    chunk,
-                    num_bits=num_bits,
-                    sym=sym,
+            Hinv1 = Hinv[i1:i2, i1:i2]
+
+            for i in range(count):
+                global_col = i1 + i
+
+                w = W1[:, i]
+                d = Hinv1[i, i]
+
+                # Recompute quantization params at group boundaries.
+                # This matches gptq.py:
+                #
+                # if (i1 + i) % groupsize == 0:
+                #     self.quantizer.find_params(W[:, col:col+groupsize], weight=True)
+                if group_size != -1:
+                    if global_col % group_size == 0:
+                        gstart = global_col
+                        gend = min(global_col + group_size, in_features)
+
+                        scale, zero, maxq = gptq_find_weight_params(
+                            W[:, gstart:gend],
+                            num_bits=num_bits,
+                            sym=sym,
+                            perchannel=perchannel,
+                        )
+
+                        saved_scales.append(scale.detach().clone().cpu())
+                        saved_zeros.append(zero.detach().clone().cpu())
+                        saved_group_starts.append(gstart)
+
+                q_int, q = gptq_reference_quantize(
+                    w.unsqueeze(1),
+                    scale,
+                    zero,
+                    maxq,
                 )
-                group_scales[r] = scale
-                group_zeros[r] = zero_point
 
-            scales_per_group.append(group_scales)
-            zeros_per_group.append(group_zeros)
+                q = q.flatten()
+                q_int = q_int.flatten()
 
-            for j in range(gstart, gend):
-                q_col = torch.empty(out_features, device=device, dtype=dtype)
-                dq_col = torch.empty(out_features, device=device, dtype=dtype)
+                Q1[:, i] = q
+                Qint1[:, i] = q_int
 
-                for r in range(out_features):
-                    q, dq = _quantize_scalar_affine(
-                        W_work[r, j],
-                        group_scales[r],
-                        group_zeros[r],
-                        qmin,
-                        qmax,
-                    )
-                    q_col[r] = q
-                    dq_col[r] = dq
+                Losses1[:, i] = (w - q) ** 2 / (d ** 2)
 
-                Q[:, j] = dq_col
-                Q_int[:, j] = q_col
+                # GPTQ local error.
+                err1 = (w - q) / d
 
-                # GPTQ-style error compensation
-                err = (W_work[:, j] - dq_col) / Hinv[j, j]
+                # Update remaining columns inside this block.
+                W1[:, i:] -= err1.unsqueeze(1).matmul(
+                    Hinv1[i, i:].unsqueeze(0)
+                )
 
-                if j + 1 < in_features:
-                    W_work[:, j + 1:] -= err.unsqueeze(1) * Hinv[j, j + 1:].unsqueeze(0)
+                Err1[:, i] = err1
 
-                W_work[:, j] = dq_col
+            Q[:, i1:i2] = Q1
+            Q_int[:, i1:i2] = Qint1
+            Losses[:, i1:i2] = Losses1 / 2
 
-        layer.weight.data.copy_(Q.to(layer.weight.data.dtype))
+            # Lazy update to all remaining columns after this block.
+            if i2 < in_features:
+                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
-        scales_tensor = torch.stack(scales_per_group, dim=1)
-        zeros_tensor = torch.stack(zeros_per_group, dim=1)
+        if actorder:
+            Q = Q[:, invperm]
+            Q_int = Q_int[:, invperm]
+
+        layer.weight.data.copy_(Q.reshape(layer.weight.shape).to(orig_dtype))
 
         if verbose:
-            print("\nManual GPTQ-like quantization applied")
+            print("\nReference-like manual GPTQ quantization applied")
             print("Weight shape:", tuple(W_orig.shape))
             print("Calibration inputs shape:", tuple(calibration_inputs.shape))
             print("num_bits:", num_bits)
             print("sym:", sym)
+            print("perchannel:", perchannel)
             print("group_size:", group_size)
-            print("num_groups:", num_groups)
+            print("blocksize:", blocksize)
             print("damping_percent:", damping_percent)
+            print("actorder:", actorder)
             print("H shape:", tuple(H.shape))
+            print("Hinv shape:", tuple(Hinv.shape))
             print("Hinv diag min/max:",
                   torch.diag(Hinv).min().item(),
                   torch.diag(Hinv).max().item())
+            print("Estimated GPTQ loss:", torch.sum(Losses).item())
 
         return {
             "quantized_int": Q_int.detach().clone().cpu(),
             "dequantized_weight": Q.detach().clone().cpu(),
-            "scales": scales_tensor.detach().clone().cpu(),
-            "zero_points": zeros_tensor.detach().clone().cpu(),
-            "Hinv": Hinv.detach().clone().cpu(),
+            "losses": Losses.detach().clone().cpu(),
+            "Hinv_cholesky": Hinv.detach().clone().cpu(),
             "group_size": group_size,
             "sym": sym,
+            "perchannel": perchannel,
             "num_bits": num_bits,
             "damping_percent": damping_percent,
+            "blocksize": blocksize,
+            "actorder": actorder,
+            "saved_scales": saved_scales,
+            "saved_zeros": saved_zeros,
+            "saved_group_starts": saved_group_starts,
         }
-
-
+    
 def apply_manual_gptq_to_one_sublayer(
     model,
     tokenizer,
@@ -483,9 +619,12 @@ def apply_manual_gptq_to_one_sublayer(
     block_index,
     sub_layer,
     num_bits=8,
-    group_size=None,
-    sym=False,
+    group_size=128,
+    sym=True,
     damping_percent=0.01,
+    blocksize=128,
+    actorder=False,
+    perchannel=True,
     verbose=True,
 ):
     layer = get_module_by_name(
@@ -508,9 +647,11 @@ def apply_manual_gptq_to_one_sublayer(
         group_size=group_size,
         sym=sym,
         damping_percent=damping_percent,
+        blocksize=blocksize,
+        actorder=actorder,
+        perchannel=perchannel,
         verbose=verbose,
     )
-
 
 def main():
     model_name = "/home/lecacca/VSCode Environment/BERT-Testing/bert_uncased_L-2_H-128_A-2"
@@ -569,8 +710,11 @@ def main():
         sub_layer=sub_layer,
         num_bits=8,
         group_size=128,
-        sym=False,
+        sym=True,
         damping_percent=0.01,
+        blocksize=128,
+        actorder=False,
+        perchannel=True,
         verbose=True,
     )
 

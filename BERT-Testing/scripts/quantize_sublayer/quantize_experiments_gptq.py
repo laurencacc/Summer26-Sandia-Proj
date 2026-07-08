@@ -40,30 +40,6 @@ def get_topk_predictions(model, tokenizer, text, k=5):
     
     return predicted_tokens, predicted_scores, mask_logits.detach().cpu(), inputs
 
-def quantize_linear_weights(layer, num_bits):
-    # manual quantization for testing
-    with torch.no_grad():
-        weights = layer.weight.data
-        # e.g. is 128 x 128 for query layer
-        # can quantized bias later too for whole projection
-    
-        qmax = 2**(num_bits-1)-1
-        max_val = weights.abs().max()
-
-        if max_val == 0:
-            return
-    
-        scale = max_val / qmax
-
-        quantized = torch.round(weights/scale)
-        quantized = torch.clamp(quantized, -qmax, qmax)
-
-        dequantized =  quantized*scale
-        # floating point tensor that approximates quantized weights
-
-        layer.weight.data.copy_(dequantized)
-
-
 def capture_activation_for_one_module(model, module, inputs):
     activations = {}
     # small container to store captured output
@@ -310,7 +286,16 @@ def restore_same_sublayer_except_target_block(
         # deepcopy of baseline layer (allows for independent copy)
         restored_layer = copy.deepcopy(baseline_layer)
 
-        device = next(quant_model.parameters()).device
+        old_quant_layer = get_module_by_name(
+            quant_model.bert.encoder.layer[block_index],
+            sub_layer,
+        )
+
+        try:
+            device = next(old_quant_layer.parameters()).device
+        except StopIteration:
+            device = next(quant_model.parameters()).device
+
         restored_layer.to(device)
 
         # replace sublayer in quantized model
@@ -414,13 +399,21 @@ def main():
         sub_layer
     )
 
-    baseline_tokens, baseline_scores, baseline_logits, inputs = get_topk_predictions(baseline_model, tokenizer, text, k=5)
+    baseline_tokens, baseline_scores, baseline_logits, baseline_inputs = get_topk_predictions(
+        baseline_model, tokenizer, text, k=5
+    )
 
-    baseline_sublayer_activation = capture_activation_for_one_module(baseline_model, baseline_sublayer, inputs)
+    quant_tokens, quant_scores, quant_logits, quant_inputs = get_topk_predictions(
+        quant_model, tokenizer, text, k=5
+    )
 
-    quant_tokens, quant_scores, quant_logits, _ = get_topk_predictions(quant_model, tokenizer, text, k=5)
+    baseline_sublayer_activation = capture_activation_for_one_module(
+        baseline_model, baseline_sublayer, baseline_inputs
+    )
 
-    quant_sublayer_activation = capture_activation_for_one_module(quant_model, quant_sublayer, inputs)
+    quant_sublayer_activation = capture_activation_for_one_module(
+        quant_model, quant_sublayer, quant_inputs
+    )
 
     compare_results(baseline_tokens, baseline_scores, baseline_logits, quant_tokens, quant_scores, quant_logits, baseline_sublayer_activation, quant_sublayer_activation)
 

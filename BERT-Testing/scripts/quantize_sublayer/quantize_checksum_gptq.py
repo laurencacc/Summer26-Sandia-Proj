@@ -7,6 +7,27 @@ import seaborn as sns
 
 EPS = 1e-12
 
+def set_poster_plot_style():
+    sns.set_theme(style="whitegrid", context="talk")
+
+    plt.rcParams.update({
+        "figure.dpi": 150,
+        "savefig.dpi": 300,
+        "font.size": 16,
+        "axes.titlesize": 17,
+        "axes.labelsize": 18,
+        "xtick.labelsize": 15,
+        "ytick.labelsize": 15,
+        "legend.fontsize": 12,
+        "legend.title_fontsize": 12,
+        "axes.linewidth": 1.2,
+        "grid.linewidth": 0.7,
+        "lines.linewidth": 2.0,
+        "lines.markersize": 7,
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+    })
+
 def move_inputs_to_model_device(inputs, model):
     device = next(model.parameters()).device
     return {k: v.to(device) for k, v in inputs.items()}
@@ -653,7 +674,17 @@ def run_one_sublayer_one_config(
         perchannel=perchannel,
         verbose=True,
     )
-    
+
+    quant_sublayer = get_module_by_name(
+        quant_model.bert.encoder.layer[block_index],
+        sub_layer,
+    )
+
+    checksum_direction_info = compute_checksum_direction(
+        baseline_weight=baseline_sublayer.weight.detach(),
+        quant_weight=quant_sublayer.weight.detach(),
+    )
+
     rows = []
 
     for text_idx, text in enumerate(eval_texts):
@@ -690,10 +721,9 @@ def run_one_sublayer_one_config(
                     bias=None if baseline_sublayer.bias is None else baseline_sublayer.bias.detach(),
                 )
 
-            predicted_checksum_info = compute_predicted_checksum_signal(
+            checksum_signal = compute_checksum_signal_from_direction(
                 input_tensor=x_quant,
-                baseline_weight=baseline_sublayer.weight.detach(),
-                quant_weight=quant_io["weight"].detach(),
+                checksum_direction=checksum_direction_info["checksum_direction"],
             )
 
             activation_metrics = compare_activation_drift(
@@ -702,7 +732,7 @@ def run_one_sublayer_one_config(
             )
 
             checksum_vs_activation_metrics = compare_predicted_checksum_to_activation_drift(
-                checksum_signal=predicted_checksum_info["checksum_signal"],
+                checksum_signal=checksum_signal,
                 baseline_output=baseline_output_on_quant_input,
                 quant_output=quant_output,
             )
@@ -755,22 +785,20 @@ def run_one_sublayer_one_config(
 
     return pd.DataFrame(rows), quant_info
 
-def compute_predicted_checksum_signal(
-    input_tensor,
-    baseline_weight,
-    quant_weight,
-):
+def compute_checksum_direction(baseline_weight, quant_weight):
     """
-    Compute the predicted checksum-visible error signal:
+    Compute the lowest-cost checksum direction:
 
-        X DeltaW^T e
+        d = DeltaW^T e
 
     where:
         DeltaW = W_quant - W_fp32
         e      = all-ones vector over output channels
+
+    For Linear weights with shape [out_features, in_features], this is
+    just the sum of DeltaW over output rows, giving shape [in_features].
     """
     with torch.no_grad():
-        x = input_tensor.detach().float().cpu()
         w = baseline_weight.detach().float().cpu()
         w_hat = quant_weight.detach().float().cpu()
 
@@ -783,18 +811,42 @@ def compute_predicted_checksum_signal(
             )
 
         delta_w = w_hat - w
-        out_features, _ = delta_w.shape
 
-        e_out = torch.ones(out_features, dtype=delta_w.dtype, device=delta_w.device)
-        checksum_direction = delta_w.T @ e_out
-        checksum_signal = torch.matmul(x, checksum_direction)
+        # Equivalent to delta_w.T @ ones(out_features)
+        checksum_direction = delta_w.sum(dim=0)
 
     return {
         "delta_w": delta_w,
-        "e_out": e_out,
         "checksum_direction": checksum_direction,
-        "checksum_signal": checksum_signal,
     }
+
+
+def compute_checksum_signal_from_direction(input_tensor, checksum_direction):
+    """
+    Compute checksum signal:
+
+        X d
+
+    where:
+        X is the captured input activation to the analyzed linear layer
+        d is the precomputed checksum direction DeltaW^T e
+
+    input_tensor shape:
+        [batch, seq_len, in_features]
+
+    checksum_direction shape:
+        [in_features]
+
+    returns:
+        checksum_signal shape [batch, seq_len]
+    """
+    with torch.no_grad():
+        x = input_tensor.detach().float().cpu()
+        d = checksum_direction.detach().float().cpu()
+
+        checksum_signal = torch.matmul(x, d)
+
+    return checksum_signal
 
 def summarize_results(df):
     summary = (
@@ -968,30 +1020,56 @@ def plot_predicted_checksum_vs_logit_drift(df, save_path=None):
     plt.show()
 
 def plot_pred_checksum_l2_vs_activation_l2(df, save_path=None):
-    plt.figure(figsize=(9, 6))
+    set_poster_plot_style()
 
-    sns.scatterplot(
-        data=df,
-        x="pred_checksum_l2",
-        y="activation_l2_drift",
-        hue="sub_layer",
-        style="config_name",
-        s=55,
-        alpha=0.8,
+    layer_name_map = {
+        "attention.self.query": "Query",
+        "attention.self.key": "Key",
+        "attention.self.value": "Value",
+        "attention.output.dense": "Attn Out",
+        "intermediate.dense": "Intermediate",
+        "output.dense": "Output",
+    }
+
+    plot_df = df.copy()
+    plot_df["sub_layer_pretty"] = (
+        plot_df["sub_layer"].map(layer_name_map).fillna(plot_df["sub_layer"])
     )
 
-    plt.xlabel(r"$\|X \Delta W^T e\|_2$")
-    plt.ylabel(r"$\|\hat{Y} - Y\|_2$")
-    plt.title(r"Predicted checksum magnitude vs raw activation drift")
-    plt.grid(alpha=0.3)
-    plt.legend(bbox_to_anchor=(1.02, 1), loc="upper left")
-    plt.tight_layout()
+    fig, ax = plt.subplots(figsize=(8.0, 4.0))
+
+    sns.scatterplot(
+        data=plot_df,
+        x="pred_checksum_l2",
+        y="activation_l2_drift",
+        hue="sub_layer_pretty",
+        s=68,
+        alpha=0.85,
+        ax=ax,
+    )
+
+    ax.set_xlabel(r"Checksum drift $\|X(\Delta W)^T e\|_2$")
+    ax.set_ylabel(r"Activation drift $\|\hat{Y} - Y\|_2$")
+    ax.grid(alpha=0.25)
+    ax.margins(x=0.03, y=0.05)
+
+    ax.legend(
+        title="Layer",
+        loc="center left",
+        bbox_to_anchor=(1.01, 0.5),
+        frameon=True,
+        borderpad=0.3,
+        handletextpad=0.4,
+        labelspacing=0.3,
+    )
+
+    fig.tight_layout(pad=0.35)
 
     if save_path is not None:
-        plt.savefig(save_path, bbox_inches="tight")
+        fig.savefig(save_path, bbox_inches="tight", pad_inches=0.02)
 
     plt.show()
-
+    
 def main():
     script_dir = Path(__file__).resolve().parent
     masked_texts_path = script_dir / "masked_texts.txt"

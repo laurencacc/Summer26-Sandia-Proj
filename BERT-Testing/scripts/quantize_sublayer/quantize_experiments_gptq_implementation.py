@@ -133,7 +133,84 @@ def actual_per_channel_checksum(output_tensor):
     with torch.no_grad():
         flat_output = output_tensor.reshape(-1, output_tensor.shape[-1])
         return flat_output.sum(dim=0)
+    
+def compute_checksum_direction_from_weight_delta(baseline_weight, quant_weight):
+    with torch.no_grad():
+        w = baseline_weight.detach().float().cpu()
+        w_hat = quant_weight.detach().float().cpu()
 
+        if w.shape != w_hat.shape:
+            raise ValueError(
+                f"Weight shapes do not match: baseline={tuple(w.shape)}, quant={tuple(w_hat.shape)}"
+            )
+
+        delta_w = w_hat - w
+        checksum_direction = delta_w.sum(dim=0)
+
+    return {
+        "delta_w": delta_w,
+        "checksum_direction": checksum_direction,
+    }
+
+def compute_checksum_signal_from_direction(input_tensor, checksum_direction):
+    with torch.no_grad():
+        x = input_tensor.detach().float().cpu()
+        d = checksum_direction.detach().float().cpu()
+        return torch.matmul(x, d)
+
+def compare_checksum_signal_to_output_checksum_drift(
+    checksum_signal,
+    baseline_output,
+    quant_output,
+    label="layer",
+    eps=1e-12,
+):
+    """
+    Validate that the precomputed checksum signal equals the
+    output-sum drift:
+
+        X(W_hat^T e - W^T e) = sum_channels(Y_hat - Y)
+
+    where:
+        Y     = baseline output on same input
+        Y_hat = quantized output
+    """
+    with torch.no_grad():
+        y = baseline_output.detach().float().cpu()
+        y_hat = quant_output.detach().float().cpu()
+
+        output_drift = y_hat - y
+
+        # Sum over output channels.
+        output_checksum_drift = output_drift.sum(dim=-1)
+
+        checksum = checksum_signal.detach().float().cpu()
+
+        diff = checksum - output_checksum_drift
+
+        max_abs_diff = diff.abs().max().item()
+        mean_abs_diff = diff.abs().mean().item()
+
+        checksum_l2 = torch.linalg.vector_norm(checksum.reshape(-1)).item()
+        output_checksum_l2 = torch.linalg.vector_norm(
+            output_checksum_drift.reshape(-1)
+        ).item()
+
+    print(f"\nPrecomputed checksum signal validation for {label}")
+    print("Checksum signal shape:", tuple(checksum.shape))
+    print(f"Checksum signal L2:              {checksum_l2:.10f}")
+    print(f"Output checksum drift L2:        {output_checksum_l2:.10f}")
+    print(f"Signal-vs-output max abs diff:   {max_abs_diff:.10f}")
+    print(f"Signal-vs-output mean abs diff:  {mean_abs_diff:.10f}")
+
+    return {
+        "checksum_signal": checksum,
+        "output_checksum_drift": output_checksum_drift,
+        "checksum_signal_l2": checksum_l2,
+        "output_checksum_drift_l2": output_checksum_l2,
+        "max_abs_diff": max_abs_diff,
+        "mean_abs_diff": mean_abs_diff,
+    }
 
 def compare_per_channel_checksum_drift(
     baseline_channel_checksum,
@@ -653,6 +730,34 @@ def apply_manual_gptq_to_one_sublayer(
         verbose=verbose,
     )
 
+def summarize_precomputed_checksum_signal(checksum_signal, label="layer"):
+    with torch.no_grad():
+        checksum = checksum_signal.detach().float().cpu()
+        flat = checksum.reshape(-1)
+
+        checksum_l1 = flat.abs().sum().item()
+        checksum_l2 = torch.linalg.vector_norm(flat).item()
+        checksum_mean_abs = flat.abs().mean().item()
+        checksum_max_abs = flat.abs().max().item()
+        checksum_signed_sum = flat.sum().item()
+
+    print(f"\nPrecomputed checksum signal summary for {label}")
+    print("Checksum signal shape:", tuple(checksum.shape))
+    print(f"Checksum L1:          {checksum_l1:.10f}")
+    print(f"Checksum L2:          {checksum_l2:.10f}")
+    print(f"Checksum mean abs:    {checksum_mean_abs:.10f}")
+    print(f"Checksum max abs:     {checksum_max_abs:.10f}")
+    print(f"Checksum signed sum:  {checksum_signed_sum:.10f}")
+
+    return {
+        "checksum_signal": checksum,
+        "checksum_l1": checksum_l1,
+        "checksum_l2": checksum_l2,
+        "checksum_mean_abs": checksum_mean_abs,
+        "checksum_max_abs": checksum_max_abs,
+        "checksum_signed_sum": checksum_signed_sum,
+    }
+
 def main():
     model_name = "/home/lecacca/VSCode Environment/BERT-Testing/bert_uncased_L-2_H-128_A-2"
 
@@ -694,13 +799,20 @@ def main():
         print_tokens=True,
     )
 
-    baseline_check = capture_layer_io_for_text(
-        baseline_model,
-        tokenizer,
-        text,
-        block_index=block_index,
-        sub_layer=sub_layer,
+    # baseline_check = capture_layer_io_for_text(
+    #     baseline_model,
+    #     tokenizer,
+    #     text,
+    #     block_index=block_index,
+    #     sub_layer=sub_layer,
+    # )
+
+    baseline_sublayer = get_module_by_name(
+        baseline_model.bert.encoder.layer[block_index],
+        sub_layer,
     )
+
+    baseline_weight = baseline_sublayer.weight.detach()
 
     quant_info = apply_manual_gptq_to_one_sublayer(
         model=quant_model,
@@ -734,42 +846,65 @@ def main():
         sub_layer=sub_layer,
     )
 
-    baseline_checksum_validation = validate_per_channel_checksum_math(
-        baseline_check,
-        label=f"baseline {sub_layer}"
+    checksum_direction_info = compute_checksum_direction_from_weight_delta(
+        baseline_weight=baseline_weight,
+        quant_weight=quant_check["weight"],
     )
 
-    quant_checksum_validation = validate_per_channel_checksum_math(
-        quant_check,
-        label=f"manual GPTQ-like {sub_layer}"
+    checksum_signal_precomputed = compute_checksum_signal_from_direction(
+        input_tensor=quant_check["input"],
+        checksum_direction=checksum_direction_info["checksum_direction"],
     )
 
-    x_q = quant_check["input"]
 
-    baseline_expected_on_quant_input = full_recompute_expected_output_checksum(
-        x_q,
-        baseline_check["weight"],
-        baseline_check["bias"],
-        label=f"FP32 expected on quantized-path input for {sub_layer}"
-    )
+    # baseline_checksum_validation = validate_per_channel_checksum_math(
+    #     baseline_check,
+    #     label=f"baseline {sub_layer}"
+    # )
 
-    quant_actual_channel_checksum = actual_per_channel_checksum(
-        quant_check["actual_output"]
-    )
+    # quant_checksum_validation = validate_per_channel_checksum_math(
+    #     quant_check,
+    #     label=f"manual GPTQ-like {sub_layer}"
+    # )
 
-    checksum_comparison = compare_per_channel_checksum_drift(
-        baseline_expected_on_quant_input["channel_checksum"],
-        quant_actual_channel_checksum,
-        baseline_channel_l1_magnitude=baseline_expected_on_quant_input[
-            "channel_l1_magnitude"
-        ],
-        label=f"{sub_layer}: quantized actual vs FP32 expected on same input"
-    )
+    # x_q = quant_check["input"]
 
-    local_activation_comparison = compare_activation_drift(
-        baseline_expected_on_quant_input["expected_output"],
-        quant_check["actual_output"],
-        label=f"{sub_layer}: local activation drift",
+    # baseline_expected_on_quant_input = full_recompute_expected_output_checksum(
+    #     x_q,
+    #     baseline_check["weight"],
+    #     baseline_check["bias"],
+    #     label=f"FP32 expected on quantized-path input for {sub_layer}"
+    # )
+
+    # precomputed_checksum_validation = compare_checksum_signal_to_output_checksum_drift(
+    #     checksum_signal=checksum_signal_precomputed,
+    #     baseline_output=baseline_expected_on_quant_input["expected_output"],
+    #     quant_output=quant_check["actual_output"],
+    #     label=f"{sub_layer}: precomputed checksum signal",
+    # )
+
+    # quant_actual_channel_checksum = actual_per_channel_checksum(
+    #     quant_check["actual_output"]
+    # )
+
+    # checksum_comparison = compare_per_channel_checksum_drift(
+    #     baseline_expected_on_quant_input["channel_checksum"],
+    #     quant_actual_channel_checksum,
+    #     baseline_channel_l1_magnitude=baseline_expected_on_quant_input[
+    #         "channel_l1_magnitude"
+    #     ],
+    #     label=f"{sub_layer}: quantized actual vs FP32 expected on same input"
+    # )
+
+    # local_activation_comparison = compare_activation_drift(
+    #     baseline_expected_on_quant_input["expected_output"],
+    #     quant_check["actual_output"],
+    #     label=f"{sub_layer}: local activation drift",
+    # )
+
+    checksum_signal_summary = summarize_precomputed_checksum_signal(
+        checksum_signal=checksum_signal_precomputed,
+        label=f"{sub_layer}: precomputed checksum signal",
     )
 
     prediction_comparison = compare_results(
@@ -781,13 +916,21 @@ def main():
         quant_logits
     )
 
+    # return {
+    #     "sub_layer": sub_layer,
+    #     "quant_info": quant_info,
+    #     "baseline_checksum_validation": baseline_checksum_validation,
+    #     "quant_checksum_validation": quant_checksum_validation,
+    #     "checksum_comparison": checksum_comparison,
+    #     "local_activation_comparison": local_activation_comparison,
+    #     "prediction_comparison": prediction_comparison,
+    #     "precomputed_checksum_validation": precomputed_checksum_validation,
+    # }
+
     return {
         "sub_layer": sub_layer,
         "quant_info": quant_info,
-        "baseline_checksum_validation": baseline_checksum_validation,
-        "quant_checksum_validation": quant_checksum_validation,
-        "checksum_comparison": checksum_comparison,
-        "local_activation_comparison": local_activation_comparison,
+        "checksum_signal_summary": checksum_signal_summary,
         "prediction_comparison": prediction_comparison,
     }
 

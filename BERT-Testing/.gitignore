@@ -15,3 +15,4 @@ visualization/compare_torchao_and_gptq/results
 scripts/quantize_sublayer/results
 scripts/bert_actual_module_math.csv
 scripts/quantize_sublayer/__pycache__
+scripts/results

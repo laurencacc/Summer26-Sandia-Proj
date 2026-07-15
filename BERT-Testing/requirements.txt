@@ -11,3 +11,4 @@ jupyter
 matplotlib
 seaborn
 scipy
+scikit-learn

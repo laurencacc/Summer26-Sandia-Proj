@@ -1,0 +1,100 @@
+Paris is the capital of [MASK].
+The sky is usually [MASK] during a clear day.
+Water freezes at zero degrees [MASK].
+The opposite of hot is [MASK].
+A dog is a type of [MASK].
+The sun rises in the [MASK].
+The moon orbits the [MASK].
+Fish live in [MASK].
+Birds can usually [MASK].
+A teacher works in a [MASK].
+A doctor works in a [MASK].
+A chef cooks food in a [MASK].
+The color of grass is usually [MASK].
+Snow is typically [MASK].
+Fire is usually [MASK].
+People read books at a [MASK].
+Cars are driven on the [MASK].
+Trains run on [MASK].
+Airplanes fly through the [MASK].
+Ships travel across the [MASK].
+The capital of France is [MASK].
+The capital of Italy is [MASK].
+The capital of Germany is [MASK].
+The capital of Spain is [MASK].
+The capital of Japan is [MASK].
+The largest ocean is the [MASK].
+The smallest month is [MASK].
+There are seven days in a [MASK].
+There are twelve months in a [MASK].
+A triangle has three [MASK].
+A square has four [MASK].
+An hour has sixty [MASK].
+A minute has sixty [MASK].
+The human body has two [MASK].
+People use their eyes to [MASK].
+People use their ears to [MASK].
+People use their nose to [MASK].
+People use their mouth to [MASK].
+Bread is often made from [MASK].
+Milk comes from a [MASK].
+Eggs are often laid by a [MASK].
+Honey is made by [MASK].
+Apples grow on [MASK].
+Bananas are usually [MASK].
+Oranges are usually [MASK].
+Coffee is often served [MASK].
+Tea is often served [MASK].
+A bicycle has two [MASK].
+A car usually has four [MASK].
+A keyboard is used for [MASK].
+A camera is used to take [MASK].
+A phone is used to make [MASK].
+A clock tells the [MASK].
+A map shows [MASK].
+A dictionary contains [MASK].
+A calendar shows the [MASK].
+Students study for an [MASK].
+Athletes train for a [MASK].
+Musicians play [MASK].
+Painters use [MASK].
+Writers use [MASK].
+Farmers grow [MASK].
+Bakers make [MASK].
+Pilots fly [MASK].
+Nurses help [MASK].
+Police officers enforce the [MASK].
+Firefighters put out [MASK].
+A library contains many [MASK].
+A museum displays [MASK].
+A zoo has many [MASK].
+A park has trees and [MASK].
+A beach has sand and [MASK].
+Mountains are high [MASK].
+Rivers flow toward the [MASK].
+Rain falls from [MASK].
+Thunder often follows [MASK].
+Winter is usually [MASK].
+Summer is usually [MASK].
+Spring comes after [MASK].
+Autumn comes before [MASK].
+Monday comes after [MASK].
+Friday comes before [MASK].
+Breakfast is eaten in the [MASK].
+Dinner is often eaten in the [MASK].
+People sleep at [MASK].
+People work during the [MASK].
+A bed is used for [MASK].
+A chair is used for [MASK].
+Shoes are worn on [MASK].
+A hat is worn on the [MASK].
+Gloves are worn on [MASK].
+A coat is worn when it is [MASK].
+An umbrella is used in the [MASK].
+Soap is used for [MASK].
+A toothbrush is used to clean [MASK].
+Medicine is used to treat [MASK].
+Exercise is good for [MASK].
+Water is important for [MASK].
+Plants need sunlight and [MASK].
+Computers process [MASK].

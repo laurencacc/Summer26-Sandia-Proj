@@ -7,9 +7,52 @@ from sklearn.metrics import r2_score, mean_squared_error, roc_auc_score, accurac
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
+from datetime import datetime
+import json
 
 EPS = 1e-12
 
+def create_run_results_dir(script_name=None, run_tag=None, base_dir="results"):
+    """
+    Create a unique results subdirectory for each script run.
+
+    Example:
+        results/predict_svd1_projection_drift_20260722_143012
+        results/predict_topk_singular_subspace_drift_k16_20260722_143012
+    """
+    base_dir = Path(base_dir)
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    if script_name is None:
+        script_name = Path(__file__).stem
+    else:
+        script_name = Path(script_name).stem
+
+    if run_tag is not None and str(run_tag).strip():
+        run_name = f"{script_name}_{run_tag}_{timestamp}"
+    else:
+        run_name = f"{script_name}_{timestamp}"
+
+    run_dir = base_dir / run_name
+    run_dir.mkdir(parents=True, exist_ok=False)
+
+    print(f"\nCreated run results directory: {run_dir}")
+
+    return run_dir
+
+
+def save_run_metadata(results_dir, metadata):
+    """
+    Save basic run metadata to JSON for reproducibility.
+    """
+    metadata_path = Path(results_dir) / "run_metadata.json"
+
+    with metadata_path.open("w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
+
+    print(f"Saved run metadata to {metadata_path}")
 
 def move_inputs_to_model_device(inputs, model):
     device = next(model.parameters()).device
@@ -1102,11 +1145,11 @@ def main():
 
     df = pd.concat(all_dfs, ignore_index=True)
 
-    df_wide = build_multisublayer_feature_table(df, target_col="logit_l2_drift")
+    # df_wide = build_multisublayer_feature_table(df, target_col="logit_l2_drift")
 
     linear_regression_df = fit_linear_regression_models(df)
-    logistic_regression_df = fit_logistic_regression_models(df)
-    multisublayer_logit_regression_df, multisublayer_pred_df = fit_multisublayer_logit_regression_with_predictions(df_wide)
+    # logistic_regression_df = fit_logistic_regression_models(df)
+    # multisublayer_logit_regression_df, multisublayer_pred_df = fit_multisublayer_logit_regression_with_predictions(df_wide)
 
     print("\nDetailed results head:")
     print(df.head())
@@ -1115,35 +1158,35 @@ def main():
     print("\nLinear regression summary:")
     print(linear_regression_df)
 
-    print("\nLogistic regression summary:")
-    print(logistic_regression_df)
+    # print("\nLogistic regression summary:")
+    # print(logistic_regression_df)
 
-    print("\nMulti-sublayer logit regression summary:")
-    print(multisublayer_logit_regression_df)
+    # print("\nMulti-sublayer logit regression summary:")
+    # print(multisublayer_logit_regression_df)
 
     results_dir = Path("results")
     results_dir.mkdir(parents=True, exist_ok=True)
 
     detailed_csv_path = results_dir / "predict_from_checksum_detailed.csv"
     linear_regression_csv_path = results_dir / "predict_from_checksum_linear_regression.csv"
-    logistic_regression_csv_path = results_dir / "predict_from_checksum_logistic_regression.csv"
+    # logistic_regression_csv_path = results_dir / "predict_from_checksum_logistic_regression.csv"
 
     df.to_csv(detailed_csv_path, index=False)
     linear_regression_df.to_csv(linear_regression_csv_path, index=False)
-    logistic_regression_df.to_csv(logistic_regression_csv_path, index=False)
+    # logistic_regression_df.to_csv(logistic_regression_csv_path, index=False)
 
     print(f"\nSaved {detailed_csv_path}")
     print(f"Saved {linear_regression_csv_path}")
-    print(f"Saved {logistic_regression_csv_path}")
+    # print(f"Saved {logistic_regression_csv_path}")
 
-    multisublayer_regression_csv_path = results_dir / "predict_from_checksum_multisublayer_logit_regression.csv"
-    multisublayer_pred_csv_path = results_dir / "predict_from_checksum_multisublayer_logit_predictions.csv"
+    # multisublayer_regression_csv_path = results_dir / "predict_from_checksum_multisublayer_logit_regression.csv"
+    # multisublayer_pred_csv_path = results_dir / "predict_from_checksum_multisublayer_logit_predictions.csv"
 
-    multisublayer_logit_regression_df.to_csv(multisublayer_regression_csv_path, index=False)
-    multisublayer_pred_df.to_csv(multisublayer_pred_csv_path, index=False)
+    # multisublayer_logit_regression_df.to_csv(multisublayer_regression_csv_path, index=False)
+    # multisublayer_pred_df.to_csv(multisublayer_pred_csv_path, index=False)
 
-    print(f"Saved {multisublayer_regression_csv_path}")
-    print(f"Saved {multisublayer_pred_csv_path}")
+    # print(f"Saved {multisublayer_regression_csv_path}")
+    # print(f"Saved {multisublayer_pred_csv_path}")
 
     plot_checksum_vs_activation(
         df,
@@ -1158,15 +1201,18 @@ def main():
         save_path=results_dir / "predict_activation_drift_one_config_4bit_g64.pdf",
     )
 
-    plot_actual_vs_predicted_logit_drift(
-        multisublayer_pred_df,
-        save_path=results_dir / "predict_from_checksum_multisublayer_logit_actual_vs_pred.pdf",
-    )
+    # plot_actual_vs_predicted_logit_drift(
+    #     multisublayer_pred_df,
+    #     save_path=results_dir / "predict_from_checksum_multisublayer_logit_actual_vs_pred.pdf",
+    # )
 
     print("\nSaved plot to results/")
 
-    return df, linear_regression_df, logistic_regression_df, multisublayer_logit_regression_df, multisublayer_pred_df, quant_infos
+    return df, linear_regression_df, quant_infos
+
+    # return df, linear_regression_df, logistic_regression_df, multisublayer_logit_regression_df, multisublayer_pred_df, quant_infos
 
 
 if __name__ == "__main__":
-    df, linear_regression_df, logistic_regression_df, multisublayer_logit_regression_df, multisublayer_pred_df, quant_infos = main()
+    df, linear_regression_df, quant_infos = main()
+    # df, linear_regression_df, logistic_regression_df, multisublayer_logit_regression_df, multisublayer_pred_df, quant_infos = main()
